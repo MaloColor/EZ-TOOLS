@@ -30,7 +30,5 @@ jobs:
           file: ./video-depth-worker/Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/video-depth-worker:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/video-depth-worker:${{ github.sha }}
-            
-            
+            crayoncree/video-depth-worker:latest
+            crayoncree/video-depth-worker:${{ github.sha }}
