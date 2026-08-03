@@ -32,3 +32,5 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/video-depth-worker:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/video-depth-worker:${{ github.sha }}
+            
+            
