@@ -41,7 +41,7 @@ def load_model() -> VideoDepthAnything:
         'Video-Depth-Anything-Large': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
     }
     
-    config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Small'])
+    config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Base'])
     model = VideoDepthAnything(**config)
     
     # Load model weights (expects checkpoint in /app/checkpoints or huggingface cache)
