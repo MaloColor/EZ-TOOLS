@@ -7,6 +7,7 @@ import numpy as np
 import OpenEXR
 import Imath
 from supabase import create_client, Client
+import runpod
 
 # --- Import Video Depth Anything Model ---
 # Assumes the repo is cloned in /app/Video-Depth-Anything (configured in Dockerfile)
@@ -132,31 +133,34 @@ def process_video_depth(
             # Save local 32-bit EXR
             save_exr_32bit(depth_frame, local_exr_path)
 
-            # Upload EXR frame to Supabase Storage
-            remote_path = f"{output_prefix}/{frame_filename}"
-            with open(local_exr_path, "rb") as exr_file:
-                supabase.storage.from_(output_bucket).upload(
-                    path=remote_path,
-                    file=exr_file,
-                    file_options={"content-type": "image/x-exr", "upsert": "true"}
-                )
-            
-            if (i + 1) % 10 == 0 or (i + 1) == len(depths):
-                print(f"  -> Uploaded {i + 1}/{len(depths)} frames ({remote_path})")
+            def handler(job):
+    """
+    RunPod Serverless Handler Function.
+    Extracts parameters from the incoming event payload.
+    """
+    job_input = job.get("input", {})
 
-        print("Successfully processed video depth and exported EXR sequence!")
+    # Extract dynamic payload variables passed from Supabase/WeWeb
+    input_bucket = job_input.get("input_bucket", "raw-videos")
+    video_key = job_input.get("video_key", "sample.mp4")
+    output_bucket = job_input.get("output_bucket", "depth-outputs")
+    output_prefix = job_input.get("output_prefix", "sequence_001")
+
+    # Call your processing function
+    process_video_depth(
+        input_bucket=input_bucket,
+        video_key=video_key,
+        output_bucket=output_bucket,
+        output_prefix=output_prefix
+    )
+
+    return {
+        "status": "success",
+        "output_prefix": output_prefix,
+        "message": f"Successfully processed depth sequence for {video_key}"
+    }
 
 
 if __name__ == "__main__":
-    # Example execution via environment variables or hardcoded test keys
-    INPUT_BUCKET = os.environ.get("INPUT_BUCKET", "raw-videos")
-    INPUT_VIDEO_KEY = os.environ.get("INPUT_VIDEO_KEY", "sample.mp4")
-    OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET", "depth-outputs")
-    OUTPUT_PREFIX = os.environ.get("OUTPUT_PREFIX", "sequence_001")
-
-    process_video_depth(
-        input_bucket=INPUT_BUCKET,
-        video_key=INPUT_VIDEO_KEY,
-        output_bucket=OUTPUT_BUCKET,
-        output_prefix=OUTPUT_PREFIX
-    )
+    # Starts listening for RunPod Serverless jobs
+    runpod.serverless.start({"handler": handler})
