@@ -20,7 +20,7 @@ from video_depth_anything.video_depth_anything import VideoDepthAnything
 # --- Environment Setup ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Small") # Options: Small, Base, Large
+MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base") # Options: Small, Base, Large
 
 
 def get_supabase() -> Client:
