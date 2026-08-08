@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import tempfile
 import cv2
@@ -9,9 +10,12 @@ import Imath
 from supabase import create_client, Client
 import runpod
 
-# --- Import Video Depth Anything Model ---
-import sys
-sys.path.append("/app/Video-Depth-Anything")
+# --- CRITICAL: Add repo paths BEFORE importing model modules ---
+repo_path = "/app/Video-Depth-Anything"
+if repo_path not in sys.path:
+    sys.path.insert(0, repo_path)
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
 
 from video_depth_anything.video_depth_anything import VideoDepthAnything
 
@@ -57,6 +61,7 @@ def load_model() -> VideoDepthAnything:
     config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Base'])
     model = VideoDepthAnything(**config)
 
+    # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if os.path.exists(checkpoint_path):
         print(f"Found local checkpoint at: {checkpoint_path}")
@@ -87,7 +92,6 @@ def process_video_depth(
     output_bucket: str,
     output_prefix: str = "depth_sequence"
 ):
-    # Initialize clients inside processing loop
     supabase = get_supabase()
     model = load_model()
 

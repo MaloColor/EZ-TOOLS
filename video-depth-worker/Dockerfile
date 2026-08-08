@@ -4,7 +4,7 @@ FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies required by OpenCV and Git
+# Install system dependencies required by OpenCV, OpenEXR, and Git
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
@@ -17,25 +17,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set working directory
 WORKDIR /app
 
-# Install Python packages (Supabase, OpenCV, OpenEXR support)
+# Install Python packages (CRITICAL: Pin numpy<2 to avoid PyTorch NumPy 2.0 crashes!)
 RUN pip install --no-cache-dir \
+    "numpy<2.0.0" \
     runpod \
     supabase \
     opencv-python-headless \
     OpenEXR \
-    numpy \
+    Imath \
     pillow
 
-# Clone Video Depth Anything repository (or copy local code)
+# Clone Video Depth Anything repository
 RUN git clone https://github.com/DepthAnything/Video-Depth-Anything.git /app/Video-Depth-Anything
 
-# --- NEW: Pre-download Base Model Weights ---
+# Pre-download Base Model Weights with exact filename expected by handler.py
 RUN mkdir -p /app/checkpoints && \
-    wget -O /app/checkpoints/video_depth_anything_vitb.pth \
+    wget -O /app/checkpoints/video-depth-anything-base.pth \
     https://huggingface.co/depth-anything/Video-Depth-Anything-Base/resolve/main/video_depth_anything_vitb.pth
 
 # Copy application files
 COPY handler.py /app/handler.py
 
-# Entry point command
-CMD ["python", "handler.py"]
+# Entry point command with unbuffered Python logs
+CMD ["python", "-u", "/app/handler.py"]
