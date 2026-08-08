@@ -15,48 +15,61 @@ sys.path.append("/app/Video-Depth-Anything")
 
 from video_depth_anything.video_depth_anything import VideoDepthAnything
 
-
 # --- Environment Setup ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base") # Options: Small, Base, Large
+MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
+
+# Global variables for model/client caching
+MODEL = None
+SUPABASE = None
 
 
 def get_supabase() -> Client:
-    """Initializes and returns the Supabase client."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables.")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    """Safely initializes and caches the Supabase client."""
+    global SUPABASE
+    if SUPABASE is None:
+        supabase_url = os.environ.get("SUPABASE_URL")
+        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise ValueError(
+                "Missing environment variables! Please ensure 'SUPABASE_URL' "
+                "and 'SUPABASE_SERVICE_ROLE_KEY' are set in your RunPod Endpoint settings."
+            )
+        SUPABASE = create_client(supabase_url, supabase_key)
+    return SUPABASE
 
 
 def load_model() -> VideoDepthAnything:
-    """Loads the Video Depth Anything model onto GPU or CPU."""
+    """Safely loads and caches the Video Depth Anything model."""
+    global MODEL
+    if MODEL is not None:
+        return MODEL
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading Video Depth Anything model ({MODEL_NAME}) on {device}...")
-    
-    # Model parameters preset
+
     model_configs = {
         'Video-Depth-Anything-Small': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
         'Video-Depth-Anything-Base': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
         'Video-Depth-Anything-Large': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
     }
-    
+
     config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Base'])
     model = VideoDepthAnything(**config)
-    
-    # Load model weights
+
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if os.path.exists(checkpoint_path):
+        print(f"Found local checkpoint at: {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
-    
-    model = model.to(device).eval()
-    return model
+    else:
+        print(f"WARNING: Checkpoint file not found at {checkpoint_path}. Attempting to run without pre-loaded weights.")
+
+    MODEL = model.to(device).eval()
+    return MODEL
 
 
 def save_exr_32bit(depth_map: np.ndarray, output_path: str):
-    """
-    Saves a 2D float32 numpy array as a single-channel 32-bit Float EXR image.
-    """
+    """Saves a 2D float32 numpy array as a single-channel 32-bit Float EXR image."""
     height, width = depth_map.shape
     depth_float32 = depth_map.astype(np.float32)
 
@@ -68,30 +81,22 @@ def save_exr_32bit(depth_map: np.ndarray, output_path: str):
     out.close()
 
 
-# --- Load Model Warmly at Worker Boot ---
-supabase = get_supabase()
-model = load_model()
-
-
 def process_video_depth(
     input_bucket: str,
     video_key: str,
     output_bucket: str,
     output_prefix: str = "depth_sequence"
 ):
-    """
-    Main processing pipeline:
-    1. Download video from Supabase.
-    2. Run Video Depth Anything inference.
-    3. Export 32-bit EXR frames.
-    4. Upload frame sequence back to Supabase.
-    """
+    # Initialize clients inside processing loop
+    supabase = get_supabase()
+    model = load_model()
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_video_path = os.path.join(tmp_dir, "input.mp4")
         exr_output_dir = os.path.join(tmp_dir, "exr_frames")
         os.makedirs(exr_output_dir, exist_ok=True)
 
-        # 1. Download Video from Supabase
+        # 1. Download Video
         print(f"[1/4] Downloading '{video_key}' from bucket '{input_bucket}'...")
         video_bytes = supabase.storage.from_(input_bucket).download(video_key)
         with open(local_video_path, "wb") as f:
@@ -117,17 +122,15 @@ def process_video_depth(
         with torch.no_grad():
             depths = model.infer_video(frames)
 
-        # 4. Write EXRs & Upload to Supabase Storage
+        # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
         for i, depth_frame in enumerate(depths):
             frame_filename = f"frame_{i:04d}.exr"
             local_exr_path = os.path.join(exr_output_dir, frame_filename)
             remote_upload_path = f"{output_prefix}/{frame_filename}"
-            
-            # Save local EXR file
+
             save_exr_32bit(depth_frame, local_exr_path)
 
-            # Upload EXR file to Supabase Bucket
             with open(local_exr_path, "rb") as exr_file:
                 supabase.storage.from_(output_bucket).upload(
                     file=exr_file,
@@ -139,28 +142,37 @@ def process_video_depth(
 
 
 def handler(job):
-    """RunPod Serverless Handler Function."""
-    job_input = job.get("input", {})
+    """RunPod Serverless Handler Function wrapped in safety try/except."""
+    try:
+        job_input = job.get("input", {})
 
-    input_bucket = job_input.get("input_bucket", "raw-videos")
-    video_key = job_input.get("video_key", "sample.mp4")
-    output_bucket = job_input.get("output_bucket", "depth-outputs")
-    output_prefix = job_input.get("output_prefix", "sequence_001")
+        input_bucket = job_input.get("input_bucket", "raw-videos")
+        video_key = job_input.get("video_key", "sample.mp4")
+        output_bucket = job_input.get("output_bucket", "depth-outputs")
+        output_prefix = job_input.get("output_prefix", "sequence_001")
 
-    process_video_depth(
-        input_bucket=input_bucket,
-        video_key=video_key,
-        output_bucket=output_bucket,
-        output_prefix=output_prefix
-    )
+        process_video_depth(
+            input_bucket=input_bucket,
+            video_key=video_key,
+            output_bucket=output_bucket,
+            output_prefix=output_prefix
+        )
 
-    return {
-        "status": "success",
-        "output_prefix": output_prefix,
-        "message": f"Successfully processed depth sequence for {video_key}"
-    }
+        return {
+            "status": "success",
+            "output_prefix": output_prefix,
+            "message": f"Successfully processed depth sequence for {video_key}"
+        }
+
+    except Exception as e:
+        print(f"ERROR OCCURRED DURING JOB PROCESSING: {str(e)}")
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "message": str(e)
+        }
 
 
 if __name__ == "__main__":
-    # Starts listening for RunPod Serverless jobs
+    print("Worker starting up and listening for RunPod jobs...")
     runpod.serverless.start({"handler": handler})
