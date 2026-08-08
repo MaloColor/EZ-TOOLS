@@ -10,7 +10,6 @@ from supabase import create_client, Client
 import runpod
 
 # --- Import Video Depth Anything Model ---
-# Assumes the repo is cloned in /app/Video-Depth-Anything (configured in Dockerfile)
 import sys
 sys.path.append("/app/Video-Depth-Anything")
 
@@ -45,7 +44,7 @@ def load_model() -> VideoDepthAnything:
     config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Base'])
     model = VideoDepthAnything(**config)
     
-    # Load model weights (expects checkpoint in /app/checkpoints or huggingface cache)
+    # Load model weights
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if os.path.exists(checkpoint_path):
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
@@ -57,7 +56,6 @@ def load_model() -> VideoDepthAnything:
 def save_exr_32bit(depth_map: np.ndarray, output_path: str):
     """
     Saves a 2D float32 numpy array as a single-channel 32-bit Float EXR image.
-    Ideal for VFX, Nuke, Blender, and Cinema 4D displacement workflows.
     """
     height, width = depth_map.shape
     depth_float32 = depth_map.astype(np.float32)
@@ -68,6 +66,11 @@ def save_exr_32bit(depth_map: np.ndarray, output_path: str):
     out = OpenEXR.OutputFile(output_path, header)
     out.writePixels({'Z': depth_float32.tobytes()})
     out.close()
+
+
+# --- Load Model Warmly at Worker Boot ---
+supabase = get_supabase()
+model = load_model()
 
 
 def process_video_depth(
@@ -83,25 +86,18 @@ def process_video_depth(
     3. Export 32-bit EXR frames.
     4. Upload frame sequence back to Supabase.
     """
-    supabase = get_supabase()
-    model = load_model()
-
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_video_path = os.path.join(tmp_dir, "input.mp4")
         exr_output_dir = os.path.join(tmp_dir, "exr_frames")
         os.makedirs(exr_output_dir, exist_ok=True)
 
-        # -------------------------------------------------------------
-        # Step 1: Download Video from Supabase
-        # -------------------------------------------------------------
+        # 1. Download Video from Supabase
         print(f"[1/4] Downloading '{video_key}' from bucket '{input_bucket}'...")
         video_bytes = supabase.storage.from_(input_bucket).download(video_key)
         with open(local_video_path, "wb") as f:
             f.write(video_bytes)
 
-        # -------------------------------------------------------------
-        # Step 2: Extract Frames and Run Inference
-        # -------------------------------------------------------------
+        # 2. Extract Frames
         print("[2/4] Reading video frames...")
         cap = cv2.VideoCapture(local_video_path)
         frames = []
@@ -109,7 +105,6 @@ def process_video_depth(
             ret, frame = cap.read()
             if not ret:
                 break
-            # Convert BGR (OpenCV) to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame_rgb)
         cap.release()
@@ -117,36 +112,41 @@ def process_video_depth(
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
 
+        # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames...")
-        # depth_array shape: (N_frames, Height, Width) in normalized float values
         with torch.no_grad():
             depths = model.infer_video(frames)
 
-        # -------------------------------------------------------------
-        # Step 3: Write EXR Files & Upload to Supabase
-        # -------------------------------------------------------------
+        # 4. Write EXRs & Upload to Supabase Storage
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
         for i, depth_frame in enumerate(depths):
             frame_filename = f"frame_{i:04d}.exr"
             local_exr_path = os.path.join(exr_output_dir, frame_filename)
+            remote_upload_path = f"{output_prefix}/{frame_filename}"
             
-            # Save local 32-bit EXR
+            # Save local EXR file
             save_exr_32bit(depth_frame, local_exr_path)
 
-            def handler(job):
-    """
-    RunPod Serverless Handler Function.
-    Extracts parameters from the incoming event payload.
-    """
+            # Upload EXR file to Supabase Bucket
+            with open(local_exr_path, "rb") as exr_file:
+                supabase.storage.from_(output_bucket).upload(
+                    file=exr_file,
+                    path=remote_upload_path,
+                    file_options={"cache-control": "3600", "upsert": "true"}
+                )
+
+        print("Finished sequence generation and upload!")
+
+
+def handler(job):
+    """RunPod Serverless Handler Function."""
     job_input = job.get("input", {})
 
-    # Extract dynamic payload variables passed from Supabase/WeWeb
     input_bucket = job_input.get("input_bucket", "raw-videos")
     video_key = job_input.get("video_key", "sample.mp4")
     output_bucket = job_input.get("output_bucket", "depth-outputs")
     output_prefix = job_input.get("output_prefix", "sequence_001")
 
-    # Call your processing function
     process_video_depth(
         input_bucket=input_bucket,
         video_key=video_key,
