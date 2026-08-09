@@ -24,6 +24,7 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
 
 # Global variables for model/client caching
 MODEL = None
+DEVICE = None
 SUPABASE = None
 
 
@@ -43,11 +44,11 @@ def get_supabase() -> Client:
     return SUPABASE
 
 
-def load_model() -> VideoDepthAnything:
-    """Safely loads and caches the Video Depth Anything model."""
-    global MODEL
+def load_model() -> tuple[VideoDepthAnything, str]:
+    """Safely loads and caches the Video Depth Anything model. Returns (model, device)."""
+    global MODEL, DEVICE
     if MODEL is not None:
-        return MODEL
+        return MODEL, DEVICE
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading Video Depth Anything model ({MODEL_NAME}) on {device}...")
@@ -58,19 +59,30 @@ def load_model() -> VideoDepthAnything:
         'Video-Depth-Anything-Large': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
     }
 
-    config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Base'])
+    if MODEL_NAME not in model_configs:
+        raise ValueError(
+            f"Unknown MODEL_NAME '{MODEL_NAME}'. Must be one of: {', '.join(model_configs)}"
+        )
+    config = model_configs[MODEL_NAME]
     model = VideoDepthAnything(**config)
 
     # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
-    if os.path.exists(checkpoint_path):
-        print(f"Found local checkpoint at: {checkpoint_path}")
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
-    else:
-        print(f"WARNING: Checkpoint file not found at {checkpoint_path}. Attempting to run without pre-loaded weights.")
+    if not os.path.exists(checkpoint_path):
+        # Fail loudly instead of silently running inference on randomly
+        # initialized weights (which would still report "status": "success"
+        # while producing garbage depth maps).
+        raise FileNotFoundError(
+            f"Checkpoint file not found at {checkpoint_path}. Only "
+            "Video-Depth-Anything-Base is pre-downloaded by the Dockerfile — "
+            "if you switched MODEL_NAME, add a matching download step there."
+        )
+    print(f"Found local checkpoint at: {checkpoint_path}")
+    model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
 
     MODEL = model.to(device).eval()
-    return MODEL
+    DEVICE = device
+    return MODEL, DEVICE
 
 
 def save_exr_32bit(depth_map: np.ndarray, output_path: str):
@@ -93,7 +105,7 @@ def process_video_depth(
     output_prefix: str = "depth_sequence"
 ):
     supabase = get_supabase()
-    model = load_model()
+    model, device = load_model()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_video_path = os.path.join(tmp_dir, "input.mp4")
@@ -109,22 +121,33 @@ def process_video_depth(
         # 2. Extract Frames
         print("[2/4] Reading video frames...")
         cap = cv2.VideoCapture(local_video_path)
+        target_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         frames = []
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
+            # NOTE: infer_video_depth() expects raw OpenCV BGR frames (it does
+            # its own internal color conversion) — do NOT convert to RGB here,
+            # that would feed the model swapped color channels.
+            frames.append(frame)
         cap.release()
 
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
 
         # 3. Run Inference
-        print(f"[3/4] Running Depth Inference across {len(frames)} frames...")
+        print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
         with torch.no_grad():
-            depths = model.infer_video(frames)
+            depths, _ = model.infer_video_depth(
+                frames, target_fps=target_fps, device=device
+            )
+
+        # Free the decoded frame buffer and any cached GPU memory before the
+        # write/upload phase — this worker's container is reused across jobs.
+        del frames
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
         # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
