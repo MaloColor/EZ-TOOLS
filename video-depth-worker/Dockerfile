@@ -19,6 +19,7 @@ WORKDIR /app
 
 # Install Python packages (CRITICAL: Pin numpy<2 to avoid PyTorch NumPy 2.0 crashes!)
 RUN pip install --no-cache-dir \
+    einops \
     "numpy<2.0.0" \
     runpod \
     supabase \
