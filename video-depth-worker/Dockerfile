@@ -18,18 +18,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python packages (CRITICAL: Pin numpy<2 to avoid PyTorch NumPy 2.0 crashes!)
+# NOTE: easydict and xformers are hard, unconditional imports inside
+# Video-Depth-Anything's dpt_temporal.py / motion_module.py — without them
+# `from video_depth_anything.video_depth import VideoDepthAnything` raises
+# ImportError and the worker never starts. einops is pinned to match the
+# version Video-Depth-Anything's own requirements.txt was built against.
 RUN pip install --no-cache-dir \
-    einops \
+    "einops==0.4.1" \
     "numpy<2.0.0" \
     runpod \
     supabase \
     opencv-python-headless \
     OpenEXR \
     Imath \
-    pillow
+    pillow \
+    easydict \
+    "xformers==0.0.23" \
+    "imageio==2.37.0" \
+    "imageio-ffmpeg==0.4.7" \
+    matplotlib \
+    tqdm \
+    decord
 
-# Clone Video Depth Anything repository
-RUN git clone https://github.com/DepthAnything/Video-Depth-Anything.git /app/Video-Depth-Anything
+# Clone Video Depth Anything repository (pinned to a known-good commit so
+# upstream API/dependency changes can't silently break this image on rebuild)
+RUN git clone https://github.com/DepthAnything/Video-Depth-Anything.git /app/Video-Depth-Anything && \
+    cd /app/Video-Depth-Anything && \
+    git checkout 4f5ae23172ba60fd7bc11ef671cca678842c7072
 
 # Pre-download Base Model Weights with exact filename expected by handler.py
 RUN mkdir -p /app/checkpoints && \
