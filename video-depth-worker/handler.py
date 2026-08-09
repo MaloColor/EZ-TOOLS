@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import tempfile
 import cv2
 import torch
@@ -16,8 +17,7 @@ if repo_path not in sys.path:
 if "/app" not in sys.path:
     sys.path.insert(0, "/app")
 
-# FIX: Import from video_depth (video_depth.py), NOT video_depth_anything
-from video_depth_anything.video_depth import VideoDepthAnything
+from video_depth_anything.video_depth_anything import VideoDepthAnything
 
 # --- Environment Setup ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
@@ -61,13 +61,13 @@ def load_model() -> VideoDepthAnything:
     config = model_configs.get(MODEL_NAME, model_configs['Video-Depth-Anything-Base'])
     model = VideoDepthAnything(**config)
 
-    # Path to downloaded weights
+    # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if os.path.exists(checkpoint_path):
         print(f"Found local checkpoint at: {checkpoint_path}")
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'), strict=True)
+        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
     else:
-        print(f"WARNING: Checkpoint file not found at {checkpoint_path}.")
+        print(f"WARNING: Checkpoint file not found at {checkpoint_path}. Attempting to run without pre-loaded weights.")
 
     MODEL = model.to(device).eval()
     return MODEL
@@ -94,7 +94,6 @@ def process_video_depth(
 ):
     supabase = get_supabase()
     model = load_model()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_video_path = os.path.join(tmp_dir, "input.mp4")
@@ -110,7 +109,6 @@ def process_video_depth(
         # 2. Extract Frames
         print("[2/4] Reading video frames...")
         cap = cv2.VideoCapture(local_video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         frames = []
         while cap.isOpened():
             ret, frame = cap.read()
@@ -126,8 +124,7 @@ def process_video_depth(
         # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames...")
         with torch.no_grad():
-            # FIX: Official method is infer_video_depth
-            depths, _ = model.infer_video_depth(frames, target_fps=int(fps), device=device)
+            depths = model.infer_video(frames)
 
         # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
