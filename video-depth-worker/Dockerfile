@@ -1,5 +1,10 @@
 # Use an official NVIDIA PyTorch image with GPU & CUDA support
-FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+# NOTE: pinned to 2.7.0/cuda12.8 (not the older 2.1.2/cuda12.1) because
+# Blackwell GPUs (RTX 50-series, RTX PRO 6000 Blackwell — compute capability
+# sm_120) are only supported starting with PyTorch 2.7.0 + CUDA 12.8. Older
+# builds fail every job with "CUDA error: no kernel image is available for
+# execution on the device" on that hardware.
+FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,7 +38,7 @@ RUN pip install --no-cache-dir \
     Imath \
     pillow \
     easydict \
-    "xformers==0.0.23" \
+    "xformers==0.0.30" \
     "imageio==2.37.0" \
     "imageio-ffmpeg==0.4.7" \
     matplotlib \
