@@ -17,7 +17,7 @@ if repo_path not in sys.path:
 if "/app" not in sys.path:
     sys.path.insert(0, "/app")
 
-from video_depth_anything.video_depth_anything import VideoDepthAnything
+from video_depth_anything.video_depth import VideoDepthAnything
 
 # --- Environment Setup ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
