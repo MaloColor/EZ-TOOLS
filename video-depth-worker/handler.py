@@ -140,9 +140,12 @@ def process_video_depth(
             ret, frame = cap.read()
             if not ret:
                 break
-            # NOTE: infer_video_depth() expects raw OpenCV BGR frames (it does
-            # its own internal color conversion) — do NOT convert to RGB here,
-            # that would feed the model swapped color channels.
+            # infer_video_depth() expects RGB frames — upstream's own
+            # utils/dc_utils.py::read_video_frames() does this exact
+            # cv2.cvtColor(..., COLOR_BGR2RGB) before calling it. cv2.VideoCapture
+            # yields BGR, so convert here or the model runs on swapped color
+            # channels.
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
         cap.release()
 
