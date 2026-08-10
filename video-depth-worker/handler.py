@@ -186,6 +186,15 @@ def process_video_depth(
         depths = (depths - depth_min) / depth_range
         print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
 
+        # infer_video_depth()'s raw ordering increases with distance (near =
+        # low value, far = high value) -- standard VFX Z-depth convention.
+        # DaVinci Resolve's depth-driven tools (Depth Map ResolveFX,
+        # Cinematic Haze) expect the opposite: white (1) = closest to camera,
+        # black (0) = farthest away. Without this flip, Resolve reads the
+        # near subject as "far" and the background as "near", which protects
+        # the background from haze instead of letting it build up there.
+        depths = 1.0 - depths
+
         # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
         for i, depth_frame in enumerate(depths):
