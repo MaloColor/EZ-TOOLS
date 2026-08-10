@@ -10,6 +10,19 @@ import Imath
 from supabase import create_client, Client
 import runpod
 
+# --- Blackwell (sm_120) workaround ---
+# xformers' bundled Flash-Attention-3 ("Hopper") kernel declares a minimum
+# compute capability of sm_90 with no upper bound, so xformers' dispatcher
+# selects it on newer architectures like Blackwell (sm_120) too — but the
+# kernel binary in this xformers release was only compiled for sm_90, so it
+# crashes with "no kernel image is available for execution on the device".
+# Disable FA3 so xformers falls back to its more portable CUTLASS kernel.
+try:
+    from xformers.ops.fmha import _set_use_fa3
+    _set_use_fa3(False)
+except ImportError:
+    pass
+
 # --- CRITICAL: Add repo paths BEFORE importing model modules ---
 repo_path = "/app/Video-Depth-Anything"
 if repo_path not in sys.path:
