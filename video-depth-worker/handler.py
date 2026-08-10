@@ -171,6 +171,21 @@ def process_video_depth(
         if device == "cuda":
             torch.cuda.empty_cache()
 
+        # infer_video_depth() returns raw, unbounded relative-depth values
+        # (just relu()'d, never normalized) — background/far pixels routinely
+        # land well above 1.0. Tools that import float EXR with standard
+        # display color management (e.g. DaVinci Resolve's default Rec.709
+        # project settings) hard-clip anything above 1.0 to solid white, which
+        # looks like a broken/blown-out depth map even though the underlying
+        # prediction is fine. Normalize to [0, 1] using a single min/max
+        # across the *whole clip* (not per-frame) so the depth scale stays
+        # consistent frame-to-frame instead of flickering.
+        depth_min = float(depths.min())
+        depth_max = float(depths.max())
+        depth_range = max(depth_max - depth_min, 1e-6)
+        depths = (depths - depth_min) / depth_range
+        print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
+
         # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
         for i, depth_frame in enumerate(depths):
