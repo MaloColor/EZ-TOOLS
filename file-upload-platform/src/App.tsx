@@ -1,5 +1,5 @@
 import { useRef, useState, type CSSProperties } from "react";
-import { supabase, INPUT_BUCKET, OUTPUT_BUCKET } from "./lib/supabaseClient";
+import { supabase, isSupabaseConfigured, INPUT_BUCKET, OUTPUT_BUCKET } from "./lib/supabaseClient";
 import { startJob, pollJobUntilDone, type JobStatus } from "./lib/job";
 import { downloadOutputAsZip } from "./lib/downloadZip";
 
@@ -58,6 +58,15 @@ export default function App() {
 
   async function startProcessing() {
     if (!file) return;
+
+    if (!isSupabaseConfigured) {
+      setError(
+        "Supabase isn't configured yet — add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in the Vercel project settings, then redeploy."
+      );
+      setView("error");
+      return;
+    }
+
     setView("processing");
     setStep(0);
     setError(null);
