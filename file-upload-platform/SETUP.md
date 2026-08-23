@@ -12,33 +12,42 @@ as Lorem Ipsum from the original design, per your call — swap it in
 
 ## 1. Supabase
 
-Create two Storage buckets (names must match, or update
+Create **one** Storage bucket (name must match, or update
 `src/lib/supabaseClient.ts`):
 
-- `raw-videos` — input videos, uploaded from the browser
-- `depth-outputs` — EXR frame sequences, written by the worker and read back
-  by the browser for the zip download
+- `depth-outputs` — holds both the uploaded input video (under `input/...`)
+  and the worker's output EXR sequence (under `sequence_*/...`), kept apart
+  by path prefix rather than by bucket. There's no per-user auth yet to make
+  bucket-level separation meaningful, so one bucket is simpler to administer
+  — split it back into two (e.g. to set different retention/cleanup rules,
+  or to make raw uploads private once auth exists) if that changes.
 
-The browser uploads/downloads using the **anon** key, so add RLS policies
-that allow it. Minimal example (tighten as needed — e.g. scope to
-authenticated users once real auth is wired up instead of the design's
-placeholder "Sign in" button):
+The browser uploads/downloads using the **anon** key, so it needs **both** an
+insert policy and a select policy — missing either one breaks a different
+half of the flow (uploads silently work but nothing can be read back, or vice
+versa). Minimal example (tighten as needed — e.g. scope to authenticated
+users once real auth is wired up instead of the design's placeholder
+"Sign in" button):
 
 ```sql
--- raw-videos: allow anon uploads
 create policy "anon insert" on storage.objects
   for insert to anon
-  with check (bucket_id = 'raw-videos');
+  with check (bucket_id = 'depth-outputs');
 
--- depth-outputs: allow anon list + download
-create policy "anon read" on storage.objects
+create policy "anon select" on storage.objects
   for select to anon
   using (bucket_id = 'depth-outputs');
 ```
 
+Sanity-check both directions before assuming it's wired up — upload a test
+object with the anon key, then immediately try to read it back with the same
+key. A 200 on upload does **not** imply the select policy exists; an object
+that "uploads fine" can still 404 on every subsequent read if only the
+insert policy was created.
+
 The worker itself (running on RunPod) uses the **service role** key
-server-side, per the existing `handler.py` — that key never touches this
-front end.
+server-side, per the existing `handler.py` — that key bypasses RLS entirely
+and never touches this front end.
 
 ## 2. RunPod
 

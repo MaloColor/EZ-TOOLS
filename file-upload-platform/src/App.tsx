@@ -73,7 +73,9 @@ export default function App() {
     setError(null);
 
     const jobUuid = crypto.randomUUID();
-    const videoKey = `${jobUuid}/${sanitizeFileName(file.name)}`;
+    // Shares one bucket with the output sequence — "input/" keeps the
+    // uploaded source video from colliding with its own "sequence_*" output.
+    const videoKey = `input/${jobUuid}/${sanitizeFileName(file.name)}`;
     const outputPrefix = `sequence_${jobUuid}`;
 
     try {

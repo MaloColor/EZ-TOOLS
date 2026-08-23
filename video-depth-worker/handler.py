@@ -219,7 +219,9 @@ def handler(job):
     try:
         job_input = job.get("input", {})
 
-        input_bucket = job_input.get("input_bucket", "raw-videos")
+        # Frontend now shares a single bucket for input and output — these
+        # defaults only matter for manual/test invocations that omit the field.
+        input_bucket = job_input.get("input_bucket", "depth-outputs")
         video_key = job_input.get("video_key", "sample.mp4")
         output_bucket = job_input.get("output_bucket", "depth-outputs")
         output_prefix = job_input.get("output_prefix", "sequence_001")
