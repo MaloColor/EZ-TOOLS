@@ -465,10 +465,9 @@ function AboutPanel({ onClose }: { onClose: () => void }) {
     { n: 2, title: "Dolore magna processing", body: "Ut enim ad minim veniam, quis nostrud exercitation ullamco." },
     { n: 3, title: "Laboris nisi download", body: "Duis aute irure dolor in reprehenderit in voluptate velit." },
   ];
-  const tiers = [
-    { name: "Free", detail: "Lorem ipsum dolor sit amet", price: "$0", active: false },
-    { name: "Pro", detail: "Consectetur adipiscing elit", price: "$12", period: "/mo", active: true },
-    { name: "Team", detail: "Sed do eiusmod tempor", price: "$29", period: "/mo", active: false },
+  const tiers: Array<{ name: string; detail: string; price: string; period?: string; active: boolean }> = [
+    { name: "Per Second", detail: "This service is calculated based on second of use", price: "$xx", active: false },
+    { name: "Other Option", detail: "Consectetur adipiscing elit", price: "$xx", active: true },
   ];
 
   return (
@@ -660,7 +659,7 @@ const styles: Record<string, CSSProperties> = {
     position: "relative",
     width: "100%",
     minHeight: "100vh",
-    background: "#f2f1ec",
+    background: "#f2f2f7",
     fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
     color: "#111111",
     display: "flex",
@@ -684,13 +683,13 @@ const styles: Record<string, CSSProperties> = {
     marginLeft: 4,
   },
   navList: {
-    flex: 1,
     display: "flex",
     flexDirection: "column",
-    gap: 10,
+    gap: 12,
   },
   navCard: {
-    flex: 1,
+    height: 100,
+    flexShrink: 0,
     border: "none",
     borderRadius: 14,
     padding: 14,
