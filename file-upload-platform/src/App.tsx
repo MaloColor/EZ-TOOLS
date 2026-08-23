@@ -35,6 +35,7 @@ export default function App() {
   const [outputInfo, setOutputInfo] = useState<OutputInfo | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [notify, setNotify] = useState(true);
+  const [davinciSafe, setDavinciSafe] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function reset() {
@@ -87,6 +88,7 @@ export default function App() {
         video_key: videoKey,
         output_bucket: OUTPUT_BUCKET,
         output_prefix: outputPrefix,
+        davinci_safe: davinciSafe,
       });
 
       await pollJobUntilDone(jobId, (status: JobStatus) => {
@@ -158,7 +160,13 @@ export default function App() {
             )}
 
             {view === "configuring" && file && (
-              <ConfiguringView file={file} onReset={reset} onStart={startProcessing} />
+              <ConfiguringView
+                file={file}
+                davinciSafe={davinciSafe}
+                onSetDavinciSafe={setDavinciSafe}
+                onReset={reset}
+                onStart={startProcessing}
+              />
             )}
 
             {view === "processing" && <ProcessingView step={step} />}
@@ -291,10 +299,14 @@ function IdleView({
 
 function ConfiguringView({
   file,
+  davinciSafe,
+  onSetDavinciSafe,
   onReset,
   onStart,
 }: {
   file: File;
+  davinciSafe: boolean;
+  onSetDavinciSafe: (value: boolean) => void;
   onReset: () => void;
   onStart: () => void;
 }) {
@@ -318,6 +330,38 @@ function ConfiguringView({
         <div style={styles.radioRow}>
           <RadioDot />
           <span style={{ fontSize: 13 }}>{OUTPUT_FORMAT_LABEL}</span>
+        </div>
+      </div>
+
+      <div>
+        <div style={styles.eyebrow}>Is this used for DaVinci?</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button
+            onClick={() => onSetDavinciSafe(true)}
+            style={{
+              ...styles.radioRow,
+              ...styles.radioRowNarrow,
+              cursor: "pointer",
+              borderColor: davinciSafe ? "#111111" : "#e5e5e5",
+              background: davinciSafe ? "#fafafa" : "#ffffff",
+            }}
+          >
+            <RadioDot filled={davinciSafe} />
+            <span style={{ fontSize: 13 }}>Yes</span>
+          </button>
+          <button
+            onClick={() => onSetDavinciSafe(false)}
+            style={{
+              ...styles.radioRow,
+              ...styles.radioRowNarrow,
+              cursor: "pointer",
+              borderColor: davinciSafe ? "#e5e5e5" : "#111111",
+              background: davinciSafe ? "#ffffff" : "#fafafa",
+            }}
+          >
+            <RadioDot filled={!davinciSafe} />
+            <span style={{ fontSize: 13 }}>No</span>
+          </button>
         </div>
       </div>
 
@@ -601,10 +645,10 @@ function CheckIcon({ size = 11, stroke = "#ffffff", width = 3 }: { size?: number
   );
 }
 
-function RadioDot() {
+function RadioDot({ filled = true }: { filled?: boolean }) {
   return (
     <span style={styles.radioOuter}>
-      <span style={styles.radioInner} />
+      {filled && <span style={styles.radioInner} />}
     </span>
   );
 }
@@ -765,6 +809,12 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: 7,
     padding: "10px 12px",
     background: "#fafafa",
+    font: "inherit",
+    color: "#111111",
+    textAlign: "left",
+  },
+  radioRowNarrow: {
+    width: 245,
   },
   radioOuter: {
     width: 15,

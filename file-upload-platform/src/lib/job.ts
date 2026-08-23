@@ -5,6 +5,7 @@ export async function startJob(input: {
   video_key: string;
   output_bucket: string;
   output_prefix: string;
+  davinci_safe: boolean;
 }): Promise<{ id: string }> {
   const res = await fetch("/api/start-job", {
     method: "POST",

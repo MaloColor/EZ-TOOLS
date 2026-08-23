@@ -115,7 +115,8 @@ def process_video_depth(
     input_bucket: str,
     video_key: str,
     output_bucket: str,
-    output_prefix: str = "depth_sequence"
+    output_prefix: str = "depth_sequence",
+    davinci_safe: bool = True
 ):
     supabase = get_supabase()
     model, device = load_model()
@@ -180,11 +181,19 @@ def process_video_depth(
         # prediction is fine. Normalize to [0, 1] using a single min/max
         # across the *whole clip* (not per-frame) so the depth scale stays
         # consistent frame-to-frame instead of flickering.
-        depth_min = float(depths.min())
-        depth_max = float(depths.max())
-        depth_range = max(depth_max - depth_min, 1e-6)
-        depths = (depths - depth_min) / depth_range
-        print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
+        #
+        # This is opt-out (davinci_safe) rather than always-on because
+        # normalizing throws away the true metric-ish depth range — tools
+        # that handle unbounded float EXR correctly (e.g. Nuke, Houdini) may
+        # prefer the raw values.
+        if davinci_safe:
+            depth_min = float(depths.min())
+            depth_max = float(depths.max())
+            depth_range = max(depth_max - depth_min, 1e-6)
+            depths = (depths - depth_min) / depth_range
+            print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
+        else:
+            print(f"Skipping normalization (davinci_safe=False) — raw depth range [{depths.min():.4f}, {depths.max():.4f}]")
 
         # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
@@ -214,12 +223,14 @@ def handler(job):
         video_key = job_input.get("video_key", "sample.mp4")
         output_bucket = job_input.get("output_bucket", "depth-outputs")
         output_prefix = job_input.get("output_prefix", "sequence_001")
+        davinci_safe = job_input.get("davinci_safe", True)
 
         process_video_depth(
             input_bucket=input_bucket,
             video_key=video_key,
             output_bucket=output_bucket,
-            output_prefix=output_prefix
+            output_prefix=output_prefix,
+            davinci_safe=davinci_safe
         )
 
         return {

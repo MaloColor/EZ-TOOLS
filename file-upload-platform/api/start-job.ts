@@ -13,7 +13,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  const { input_bucket, video_key, output_bucket, output_prefix } = req.body ?? {};
+  const { input_bucket, video_key, output_bucket, output_prefix, davinci_safe } = req.body ?? {};
   if (!video_key) {
     res.status(400).json({ error: "video_key is required" });
     return;
@@ -26,7 +26,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      input: { input_bucket, video_key, output_bucket, output_prefix },
+      input: { input_bucket, video_key, output_bucket, output_prefix, davinci_safe },
     }),
   });
 
