@@ -1,12 +1,6 @@
 import JSZip from "jszip";
 import { supabase } from "./supabaseClient";
 
-/**
- * Lists every file the worker wrote under `outputBucket/outputPrefix`,
- * downloads each blob, and packages them into a single zip the browser saves
- * as `${zipName}.zip` — the worker uploads one EXR per frame, not one file,
- * so this is what makes the design's single "Download" button truthful.
- */
 export async function downloadOutputAsZip(
   outputBucket: string,
   outputPrefix: string,
