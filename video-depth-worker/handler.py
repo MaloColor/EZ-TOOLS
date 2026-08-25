@@ -166,26 +166,10 @@ def process_video_depth(
                 frames, target_fps=target_fps, device=device
             )
 
-        # Free the decoded frame buffer and any cached GPU memory before the
-        # write/upload phase — this worker's container is reused across jobs.
         del frames
         if device == "cuda":
             torch.cuda.empty_cache()
 
-        # infer_video_depth() returns raw, unbounded relative-depth values
-        # (just relu()'d, never normalized) — background/far pixels routinely
-        # land well above 1.0. Tools that import float EXR with standard
-        # display color management (e.g. DaVinci Resolve's default Rec.709
-        # project settings) hard-clip anything above 1.0 to solid white, which
-        # looks like a broken/blown-out depth map even though the underlying
-        # prediction is fine. Normalize to [0, 1] using a single min/max
-        # across the *whole clip* (not per-frame) so the depth scale stays
-        # consistent frame-to-frame instead of flickering.
-        #
-        # This is opt-out (davinci_safe) rather than always-on because
-        # normalizing throws away the true metric-ish depth range — tools
-        # that handle unbounded float EXR correctly (e.g. Nuke, Houdini) may
-        # prefer the raw values.
         if davinci_safe:
             depth_min = float(depths.min())
             depth_max = float(depths.max())
@@ -219,8 +203,6 @@ def handler(job):
     try:
         job_input = job.get("input", {})
 
-        # Frontend now shares a single bucket for input and output — these
-        # defaults only matter for manual/test invocations that omit the field.
         input_bucket = job_input.get("input_bucket", "depth-outputs")
         video_key = job_input.get("video_key", "sample.mp4")
         output_bucket = job_input.get("output_bucket", "depth-outputs")
