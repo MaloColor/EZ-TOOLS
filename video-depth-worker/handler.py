@@ -82,9 +82,6 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if not os.path.exists(checkpoint_path):
-        # Fail loudly instead of silently running inference on randomly
-        # initialized weights (which would still report "status": "success"
-        # while producing garbage depth maps).
         raise FileNotFoundError(
             f"Checkpoint file not found at {checkpoint_path}. Only "
             "Video-Depth-Anything-Base is pre-downloaded by the Dockerfile — "
@@ -141,22 +138,12 @@ def process_video_depth(
             ret, frame = cap.read()
             if not ret:
                 break
-            # infer_video_depth() expects RGB frames — upstream's own
-            # utils/dc_utils.py::read_video_frames() does this exact
-            # cv2.cvtColor(..., COLOR_BGR2RGB) before calling it. cv2.VideoCapture
-            # yields BGR, so convert here or the model runs on swapped color
-            # channels.
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
         cap.release()
 
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
-
-        # infer_video_depth() indexes into `frames` with .shape (video_depth.py
-        # does `frame_list = [frames[i] for i in range(frames.shape[0])]`), so
-        # it must be a single ndarray, not a plain Python list of per-frame
-        # arrays.
         frames = np.stack(frames, axis=0)
 
         # 3. Run Inference
