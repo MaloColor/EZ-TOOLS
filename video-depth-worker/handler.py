@@ -82,9 +82,6 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if not os.path.exists(checkpoint_path):
-        # Fail loudly instead of silently running inference on randomly
-        # initialized weights (which would still report "status": "success"
-        # while producing garbage depth maps).
         raise FileNotFoundError(
             f"Checkpoint file not found at {checkpoint_path}. Only "
             "Video-Depth-Anything-Base is pre-downloaded by the Dockerfile — "
@@ -115,7 +112,8 @@ def process_video_depth(
     input_bucket: str,
     video_key: str,
     output_bucket: str,
-    output_prefix: str = "depth_sequence"
+    output_prefix: str = "depth_sequence",
+    davinci_safe: bool = True
 ):
     supabase = get_supabase()
     model, device = load_model()
@@ -140,22 +138,12 @@ def process_video_depth(
             ret, frame = cap.read()
             if not ret:
                 break
-            # infer_video_depth() expects RGB frames — upstream's own
-            # utils/dc_utils.py::read_video_frames() does this exact
-            # cv2.cvtColor(..., COLOR_BGR2RGB) before calling it. cv2.VideoCapture
-            # yields BGR, so convert here or the model runs on swapped color
-            # channels.
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
         cap.release()
 
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
-
-        # infer_video_depth() indexes into `frames` with .shape (video_depth.py
-        # does `frame_list = [frames[i] for i in range(frames.shape[0])]`), so
-        # it must be a single ndarray, not a plain Python list of per-frame
-        # arrays.
         frames = np.stack(frames, axis=0)
 
         # 3. Run Inference
@@ -165,26 +153,18 @@ def process_video_depth(
                 frames, target_fps=target_fps, device=device
             )
 
-        # Free the decoded frame buffer and any cached GPU memory before the
-        # write/upload phase — this worker's container is reused across jobs.
         del frames
         if device == "cuda":
             torch.cuda.empty_cache()
 
-        # infer_video_depth() returns raw, unbounded relative-depth values
-        # (just relu()'d, never normalized) — background/far pixels routinely
-        # land well above 1.0. Tools that import float EXR with standard
-        # display color management (e.g. DaVinci Resolve's default Rec.709
-        # project settings) hard-clip anything above 1.0 to solid white, which
-        # looks like a broken/blown-out depth map even though the underlying
-        # prediction is fine. Normalize to [0, 1] using a single min/max
-        # across the *whole clip* (not per-frame) so the depth scale stays
-        # consistent frame-to-frame instead of flickering.
-        depth_min = float(depths.min())
-        depth_max = float(depths.max())
-        depth_range = max(depth_max - depth_min, 1e-6)
-        depths = (depths - depth_min) / depth_range
-        print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
+        if davinci_safe:
+            depth_min = float(depths.min())
+            depth_max = float(depths.max())
+            depth_range = max(depth_max - depth_min, 1e-6)
+            depths = (depths - depth_min) / depth_range
+            print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
+        else:
+            print(f"Skipping normalization (davinci_safe=False) — raw depth range [{depths.min():.4f}, {depths.max():.4f}]")
 
         # 4. Save and Upload EXRs
         print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
@@ -210,16 +190,18 @@ def handler(job):
     try:
         job_input = job.get("input", {})
 
-        input_bucket = job_input.get("input_bucket", "raw-videos")
+        input_bucket = job_input.get("input_bucket", "depth-outputs")
         video_key = job_input.get("video_key", "sample.mp4")
         output_bucket = job_input.get("output_bucket", "depth-outputs")
         output_prefix = job_input.get("output_prefix", "sequence_001")
+        davinci_safe = job_input.get("davinci_safe", True)
 
         process_video_depth(
             input_bucket=input_bucket,
             video_key=video_key,
             output_bucket=output_bucket,
-            output_prefix=output_prefix
+            output_prefix=output_prefix,
+            davinci_safe=davinci_safe
         )
 
         return {
