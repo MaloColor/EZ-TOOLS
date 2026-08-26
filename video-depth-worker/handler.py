@@ -79,35 +79,18 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     config = model_configs[MODEL_NAME]
     model = VideoDepthAnything(**config)
 
+    # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if not os.path.exists(checkpoint_path):
-        # Fail loudly instead of silently running inference on randomly
-        # initialized weights (which would still report "status": "success"
-        # while producing garbage depth maps).
         raise FileNotFoundError(
             f"Checkpoint file not found at {checkpoint_path}. Only "
             "Video-Depth-Anything-Base is pre-downloaded by the Dockerfile — "
             "if you switched MODEL_NAME, add a matching download step there."
         )
     print(f"Found local checkpoint at: {checkpoint_path}")
-    
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model.load_state_dict(checkpoint)
-    
-    # Move model to device BEFORE eval()
-    model = model.to(device)
-    model = model.eval()
-    
-    # CRITICAL: Force ALL submodules to GPU, including pretrained encoder
-    for param in model.parameters():
-        param.data = param.data.to(device)
-    
-    # Verify model is on correct device
-    print(f"Model device: {next(model.parameters()).device}")
-    print(f"Pretrained encoder device: {next(model.pretrained.parameters()).device}")
-    
-    MODEL = model
+    model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+
+    MODEL = model.to(device).eval()
     DEVICE = device
     return MODEL, DEVICE
 
@@ -155,53 +138,20 @@ def process_video_depth(
             ret, frame = cap.read()
             if not ret:
                 break
-            # infer_video_depth() expects RGB frames — upstream's own
-            # utils/dc_utils.py::read_video_frames() does this exact
-            # cv2.cvtColor(..., COLOR_BGR2RGB) before calling it. cv2.VideoCapture
-            # yields BGR, so convert here or the model runs on swapped color
-            # channels.
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
         cap.release()
 
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
-
-        # infer_video_depth() indexes into `frames` with .shape (video_depth.py
-        # does `frame_list = [frames[i] for i in range(frames.shape[0])]`), so
-        # it must be a single ndarray, not a plain Python list of per-frame
-        # arrays.
         frames = np.stack(frames, axis=0)
 
         # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
-        
-        # CRITICAL: Verify CUDA is available and device is set correctly
-        print(f"CUDA available: {torch.cuda.is_available()}")
-        print(f"Device being used: {device}")
-        print(f"Current CUDA device: {torch.cuda.current_device()}")
-        print(f"Device name: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory before inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-
-        print("Starting inference loop...")
-        # NOTE: pass `frames` as a plain numpy array here, NOT a torch.Tensor.
-        # infer_video_depth() does its own per-frame preprocessing internally
-        # (frame_list[i].astype(np.float32) / 255.0, then torch.from_numpy(...)
-        # per chunk, moved to `device` right before each forward pass) — it
-        # expects raw numpy frames and does its own GPU transfer already. A
-        # previous "optimization" pre-converted frames to a GPU tensor before
-        # this call, but .astype() doesn't exist on torch.Tensor, so it broke
-        # infer_video_depth()'s preprocessing outright, and moving the whole
-        # clip to GPU up front bought nothing anyway since the function
-        # re-transfers per-chunk regardless.
         with torch.no_grad():
             depths, _ = model.infer_video_depth(
                 frames, target_fps=target_fps, device=device
             )
-
-        print("Inference loop completed!")
-        
-        print(f"GPU Memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
         del frames
         if device == "cuda":
