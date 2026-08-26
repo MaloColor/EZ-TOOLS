@@ -150,12 +150,14 @@ def process_video_depth(
 
         # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
+        if device == "cuda":
+            print(f"GPU Memory before inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         with torch.no_grad():
-        # Convert to tensor just for passing, let the model handle it
-        frames_tensor = torch.from_numpy(frames).float().to(device)
-        depths, _ = model.infer_video_depth(
-        frames_tensor, target_fps=target_fps, device=device
-    )
+            depths, _ = model.infer_video_depth(
+                frames, target_fps=target_fps, device=device
+            )
+        if device == "cuda":
+            print(f"GPU Memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     # If it returns tensor, convert back to numpy if needed
     if isinstance(depths, torch.Tensor):
         depths = depths.cpu().numpy()
