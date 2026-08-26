@@ -145,6 +145,8 @@ def process_video_depth(
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
         frames = np.stack(frames, axis=0)
+        frames = torch.from_numpy(frames).to(device).float()
+
 
         # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
