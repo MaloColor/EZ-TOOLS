@@ -108,38 +108,6 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     DEVICE = device
     return MODEL, DEVICE
 
-    if MODEL_NAME not in model_configs:
-        raise ValueError(
-            f"Unknown MODEL_NAME '{MODEL_NAME}'. Must be one of: {', '.join(model_configs)}"
-        )
-    config = model_configs[MODEL_NAME]
-    model = VideoDepthAnything(**config)
-
-    checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(
-            f"Checkpoint file not found at {checkpoint_path}. Only "
-            "Video-Depth-Anything-Base is pre-downloaded by the Dockerfile — "
-            "if you switched MODEL_NAME, add a matching download step there."
-        )
-    print(f"Found local checkpoint at: {checkpoint_path}")
-    
-    # Load checkpoint with explicit device handling
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model.load_state_dict(checkpoint)
-    
-    # Move model to device BEFORE eval()
-    model = model.to(device)
-    model = model.eval()
-    
-    # Verify model is on correct device
-    print(f"Model device: {next(model.parameters()).device}")
-    print(f"Model dtype: {next(model.parameters()).dtype}")
-    
-    MODEL = model
-    DEVICE = device
-    return MODEL, DEVICE
-
 
 def save_exr_32bit(depth_map: np.ndarray, output_path: str):
     """Saves a 2D float32 numpy array as a single-channel 32-bit Float EXR image."""
@@ -201,21 +169,23 @@ def process_video_depth(
         print(f"Current CUDA device: {torch.cuda.current_device()}")
         print(f"Device name: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory before inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-        
+
         print("Starting inference loop...")
-        # Convert frames to GPU tensor before inference
-        frames_tensor = torch.from_numpy(frames).float().to(device) / 255.0
-        print(f"Frames moved to GPU: {frames_tensor.device}")
-        
+        # NOTE: pass `frames` as a plain numpy array here, NOT a torch.Tensor.
+        # infer_video_depth() does its own per-frame preprocessing internally
+        # (frame_list[i].astype(np.float32) / 255.0, then torch.from_numpy(...)
+        # per chunk, moved to `device` right before each forward pass) — it
+        # expects raw numpy frames and does its own GPU transfer already. A
+        # previous "optimization" pre-converted frames to a GPU tensor before
+        # this call, but .astype() doesn't exist on torch.Tensor, so it broke
+        # infer_video_depth()'s preprocessing outright, and moving the whole
+        # clip to GPU up front bought nothing anyway since the function
+        # re-transfers per-chunk regardless.
         with torch.no_grad():
             depths, _ = model.infer_video_depth(
-                frames_tensor, target_fps=target_fps, device=device
+                frames, target_fps=target_fps, device=device
             )
-        
-        # Convert back to numpy if needed
-        if isinstance(depths, torch.Tensor):
-            depths = depths.cpu().numpy()
-        
+
         print("Inference loop completed!")
         
         print(f"GPU Memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
