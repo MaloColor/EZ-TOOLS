@@ -148,16 +148,20 @@ def process_video_depth(
 
         # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
-        if device == "cuda":
-            print(f"GPU Memory before inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        
+        # CRITICAL: Verify CUDA is available and device is set correctly
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print(f"Device being used: {device}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"Device name: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory before inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         
         with torch.no_grad():
             depths, _ = model.infer_video_depth(
                 frames, target_fps=target_fps, device=device
             )
         
-        if device == "cuda":
-            print(f"GPU Memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        print(f"GPU Memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
         del frames
         if device == "cuda":
