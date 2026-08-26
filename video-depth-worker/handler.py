@@ -79,7 +79,6 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     config = model_configs[MODEL_NAME]
     model = VideoDepthAnything(**config)
 
-    # Matches the filename saved by Dockerfile: /app/checkpoints/video-depth-anything-base.pth
     checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
@@ -88,9 +87,20 @@ def load_model() -> tuple[VideoDepthAnything, str]:
             "if you switched MODEL_NAME, add a matching download step there."
         )
     print(f"Found local checkpoint at: {checkpoint_path}")
-    model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
-
-    MODEL = model.to(device).eval()
+    
+    # Load checkpoint with explicit device handling
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    model.load_state_dict(checkpoint)
+    
+    # Move model to device BEFORE eval()
+    model = model.to(device)
+    model = model.eval()
+    
+    # Verify model is on correct device
+    print(f"Model device: {next(model.parameters()).device}")
+    print(f"Model dtype: {next(model.parameters()).dtype}")
+    
+    MODEL = model
     DEVICE = device
     return MODEL, DEVICE
 
