@@ -6,7 +6,7 @@ import { downloadOutputAsZip } from "./lib/downloadZip";
 type View = "idle" | "configuring" | "processing" | "done" | "error";
 type Overlay = "none" | "about" | "login" | "settings";
 
-const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_BYTES = 100 * 1024 * 1024;
 const OUTPUT_FORMAT_LABEL = "EXR Depth Sequence";
 const STEP_LABELS = ["Uploading", "Analyzing", "Preparing output"];
 
@@ -49,7 +49,7 @@ export default function App() {
   function pickFile(f: File | null | undefined) {
     if (!f) return;
     if (f.size > MAX_BYTES) {
-      setError(`"${f.name}" is ${formatSize(f.size)} — max is 25MB.`);
+      setError(`"${f.name}" is ${formatSize(f.size)} — max is 100MB.`);
       return;
     }
     setError(null);
@@ -289,7 +289,7 @@ function IdleView({
         <div>
           <div style={{ fontSize: 14, fontWeight: 500 }}>Drag a file here or click to browse</div>
           <div style={{ fontSize: 10, color: "#999999", marginTop: 4 }}>
-            Outputs as {OUTPUT_FORMAT_LABEL} — up to 25MB
+            Outputs as {OUTPUT_FORMAT_LABEL} — up to 100MB
           </div>
         </div>
         <input ref={fileInputRef} type="file" accept="video/*" onChange={onFileChange} style={{ display: "none" }} />
