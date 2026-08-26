@@ -145,22 +145,19 @@ def process_video_depth(
         if not frames:
             raise ValueError("No frames could be extracted from the provided video file.")
         frames = np.stack(frames, axis=0)
-        frames = torch.from_numpy(frames).to(device).float()
-
 
         # 3. Run Inference
         print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
         if device == "cuda":
             print(f"GPU Memory before inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        
         with torch.no_grad():
             depths, _ = model.infer_video_depth(
                 frames, target_fps=target_fps, device=device
             )
+        
         if device == "cuda":
             print(f"GPU Memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    # If it returns tensor, convert back to numpy if needed
-    if isinstance(depths, torch.Tensor):
-        depths = depths.cpu().numpy()
 
         del frames
         if device == "cuda":
