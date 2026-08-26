@@ -88,6 +88,42 @@ def load_model() -> tuple[VideoDepthAnything, str]:
         )
     print(f"Found local checkpoint at: {checkpoint_path}")
     
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    model.load_state_dict(checkpoint)
+    
+    # Move model to device BEFORE eval()
+    model = model.to(device)
+    model = model.eval()
+    
+    # CRITICAL: Force ALL submodules to GPU, including pretrained encoder
+    for param in model.parameters():
+        param.data = param.data.to(device)
+    
+    # Verify model is on correct device
+    print(f"Model device: {next(model.parameters()).device}")
+    print(f"Pretrained encoder device: {next(model.pretrained.parameters()).device}")
+    
+    MODEL = model
+    DEVICE = device
+    return MODEL, DEVICE
+
+    if MODEL_NAME not in model_configs:
+        raise ValueError(
+            f"Unknown MODEL_NAME '{MODEL_NAME}'. Must be one of: {', '.join(model_configs)}"
+        )
+    config = model_configs[MODEL_NAME]
+    model = VideoDepthAnything(**config)
+
+    checkpoint_path = f"/app/checkpoints/{MODEL_NAME.lower()}.pth"
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint file not found at {checkpoint_path}. Only "
+            "Video-Depth-Anything-Base is pre-downloaded by the Dockerfile — "
+            "if you switched MODEL_NAME, add a matching download step there."
+        )
+    print(f"Found local checkpoint at: {checkpoint_path}")
+    
     # Load checkpoint with explicit device handling
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(checkpoint)
