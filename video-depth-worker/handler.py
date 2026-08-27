@@ -92,6 +92,18 @@ def load_model() -> tuple[VideoDepthAnything, str]:
 
     MODEL = model.to(device).eval()
     DEVICE = device
+
+    # Ground-truth check, independent of any external dashboard/telemetry:
+    # ask PyTorch itself how much GPU memory it's actually holding right
+    # after placing the model. If this prints 0 while device == "cuda",
+    # something is genuinely wrong with GPU placement, not just a
+    # telemetry-reporting quirk on RunPod's end.
+    if device == "cuda":
+        allocated = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        print(f"[GPU CHECK] torch.cuda.memory_allocated() = {allocated:.3f} GB")
+        print(f"[GPU CHECK] torch.cuda.memory_reserved()  = {reserved:.3f} GB")
+
     return MODEL, DEVICE
 
 
@@ -152,6 +164,15 @@ def process_video_depth(
             depths, _ = model.infer_video_depth(
                 frames, target_fps=target_fps, device=device
             )
+
+        # Same ground-truth GPU memory check as in load_model(), taken right
+        # after inference finishes (before empty_cache() releases anything),
+        # to see whether VRAM usage moved at all during the actual compute.
+        if device == "cuda":
+            allocated = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            print(f"[GPU CHECK] post-inference memory_allocated() = {allocated:.3f} GB")
+            print(f"[GPU CHECK] post-inference memory_reserved()  = {reserved:.3f} GB")
 
         del frames
         if device == "cuda":
