@@ -35,6 +35,16 @@ from video_depth_anything.video_depth import VideoDepthAnything
 # --- Environment Setup ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
 
+# Cap how many frames we hold in memory (raw frames + depth output) at
+# once. Holding an entire long video's frames and depths simultaneously was
+# crashing real jobs with a silent SIGKILL (exit 137, no Python traceback)
+# -- infer_video_depth()'s own np.stack() of the full clip, plus our
+# normalization step, each need a full-size copy of the whole clip's depth
+# data at once. Processing in bounded chunks keeps peak memory roughly
+# constant regardless of video length. Tunable via env var since the right
+# chunk size depends on video resolution and available RAM.
+CHUNK_SIZE_FRAMES = int(os.environ.get("CHUNK_SIZE_FRAMES", "150"))
+
 # Global variables for model/client caching
 MODEL = None
 DEVICE = None
@@ -141,67 +151,113 @@ def process_video_depth(
         with open(local_video_path, "wb") as f:
             f.write(video_bytes)
 
-        # 2. Extract Frames
-        print("[2/4] Reading video frames...")
+        # 2-4. Stream frames from the video in bounded-size chunks, running
+        # inference and uploading each chunk's EXRs before moving on to the
+        # next one, instead of holding the entire clip's frames and depth
+        # output in memory at once. This keeps peak memory roughly constant
+        # regardless of video length.
+        #
+        # Tradeoff: infer_video_depth() does its own internal scale-and-shift
+        # alignment ACROSS the frames passed to a single call, so processing
+        # independent chunks means there can be a small depth-scale
+        # discontinuity at each chunk boundary that wouldn't exist if the
+        # whole clip were processed in one call. In practice that's a minor
+        # seam every CHUNK_SIZE_FRAMES frames -- a much better tradeoff than
+        # the job crashing outright on anything longer than a short clip.
         cap = cv2.VideoCapture(local_video_path)
         target_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frames = []
+        total_frames_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+        hint_suffix = f", ~{total_frames_hint} frames total" if total_frames_hint else ""
+        print(
+            f"[2-4/4] Processing video in chunks of {CHUNK_SIZE_FRAMES} frames "
+            f"(fps={target_fps}{hint_suffix})..."
+        )
+
+        frame_index = 0
+        chunk_num = 0
+
+        def flush_chunk(buffer):
+            nonlocal frame_index, chunk_num
+            if not buffer:
+                return
+            chunk_num += 1
+            chunk_frames = np.stack(buffer, axis=0)
+            n = len(chunk_frames)
+            print(
+                f"[chunk {chunk_num}] Running depth inference on frames "
+                f"{frame_index}-{frame_index + n - 1} ({n} frames)..."
+            )
+
+            with torch.no_grad():
+                chunk_depths, _ = model.infer_video_depth(
+                    chunk_frames, target_fps=target_fps, device=device
+                )
+
+            # Ground-truth GPU memory check (see load_model()) -- only on the
+            # first chunk, so this doesn't spam the log on long videos.
+            if chunk_num == 1 and device == "cuda":
+                allocated = torch.cuda.memory_allocated() / 1e9
+                reserved = torch.cuda.memory_reserved() / 1e9
+                print(f"[GPU CHECK] post-inference memory_allocated() = {allocated:.3f} GB")
+                print(f"[GPU CHECK] post-inference memory_reserved()  = {reserved:.3f} GB")
+
+            del chunk_frames
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
+            if davinci_safe:
+                depth_min = float(chunk_depths.min())
+                depth_max = float(chunk_depths.max())
+                depth_range = max(depth_max - depth_min, 1e-6)
+                chunk_depths = (chunk_depths - depth_min) / depth_range
+                print(
+                    f"[chunk {chunk_num}] Normalized depth range "
+                    f"[{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]"
+                )
+            else:
+                print(
+                    f"[chunk {chunk_num}] Skipping normalization (davinci_safe=False) "
+                    f"— raw depth range [{chunk_depths.min():.4f}, {chunk_depths.max():.4f}]"
+                )
+
+            for depth_frame in chunk_depths:
+                frame_filename = f"frame_{frame_index:04d}.exr"
+                local_exr_path = os.path.join(exr_output_dir, frame_filename)
+                remote_upload_path = f"{output_prefix}/{frame_filename}"
+
+                save_exr_32bit(depth_frame, local_exr_path)
+
+                with open(local_exr_path, "rb") as exr_file:
+                    supabase.storage.from_(output_bucket).upload(
+                        file=exr_file,
+                        path=remote_upload_path,
+                        file_options={"cache-control": "3600", "upsert": "true"}
+                    )
+                # Delete each temp EXR right after upload rather than letting
+                # them pile up in tmp_dir for the whole job -- disk on these
+                # workers is small (a few GB free) and long videos can mean
+                # thousands of frames.
+                os.remove(local_exr_path)
+                frame_index += 1
+
+            print(f"[chunk {chunk_num}] Uploaded {n} frame(s), {frame_index} total so far.")
+
+        buffer = []
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
+            buffer.append(frame)
+            if len(buffer) >= CHUNK_SIZE_FRAMES:
+                flush_chunk(buffer)
+                buffer = []
         cap.release()
 
-        if not frames:
+        flush_chunk(buffer)
+
+        if frame_index == 0:
             raise ValueError("No frames could be extracted from the provided video file.")
-        frames = np.stack(frames, axis=0)
-
-        # 3. Run Inference
-        print(f"[3/4] Running Depth Inference across {len(frames)} frames (fps={target_fps})...")
-        with torch.no_grad():
-            depths, _ = model.infer_video_depth(
-                frames, target_fps=target_fps, device=device
-            )
-
-        # Same ground-truth GPU memory check as in load_model(), taken right
-        # after inference finishes (before empty_cache() releases anything),
-        # to see whether VRAM usage moved at all during the actual compute.
-        if device == "cuda":
-            allocated = torch.cuda.memory_allocated() / 1e9
-            reserved = torch.cuda.memory_reserved() / 1e9
-            print(f"[GPU CHECK] post-inference memory_allocated() = {allocated:.3f} GB")
-            print(f"[GPU CHECK] post-inference memory_reserved()  = {reserved:.3f} GB")
-
-        del frames
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-        if davinci_safe:
-            depth_min = float(depths.min())
-            depth_max = float(depths.max())
-            depth_range = max(depth_max - depth_min, 1e-6)
-            depths = (depths - depth_min) / depth_range
-            print(f"Normalized depth range [{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]")
-        else:
-            print(f"Skipping normalization (davinci_safe=False) — raw depth range [{depths.min():.4f}, {depths.max():.4f}]")
-
-        # 4. Save and Upload EXRs
-        print(f"[4/4] Writing EXRs and uploading sequence to '{output_bucket}'...")
-        for i, depth_frame in enumerate(depths):
-            frame_filename = f"frame_{i:04d}.exr"
-            local_exr_path = os.path.join(exr_output_dir, frame_filename)
-            remote_upload_path = f"{output_prefix}/{frame_filename}"
-
-            save_exr_32bit(depth_frame, local_exr_path)
-
-            with open(local_exr_path, "rb") as exr_file:
-                supabase.storage.from_(output_bucket).upload(
-                    file=exr_file,
-                    path=remote_upload_path,
-                    file_options={"cache-control": "3600", "upsert": "true"}
-                )
 
         print("Finished sequence generation and upload!")
 
