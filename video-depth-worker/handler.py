@@ -2,6 +2,7 @@ import os
 import sys
 import glob
 import tempfile
+import time
 import cv2
 import torch
 import numpy as np
@@ -130,6 +131,43 @@ def save_exr_32bit(depth_map: np.ndarray, output_path: str):
     out.close()
 
 
+def upload_with_retry(
+    supabase: Client,
+    bucket: str,
+    remote_path: str,
+    local_path: str,
+    max_attempts: int = 4,
+):
+    """Uploads a file to Supabase Storage, retrying on transient network
+    errors (timeouts, connection resets) with exponential backoff.
+
+    A sequence upload is hundreds to thousands of individual HTTP requests
+    -- one flaky read timeout on any single one of them used to kill the
+    entire job outright, even after everything before it had succeeded.
+    """
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with open(local_path, "rb") as exr_file:
+                supabase.storage.from_(bucket).upload(
+                    file=exr_file,
+                    path=remote_path,
+                    file_options={"cache-control": "3600", "upsert": "true"}
+                )
+            return
+        except Exception as e:
+            last_error = e
+            if attempt == max_attempts:
+                break
+            backoff = 2 ** (attempt - 1)  # 1s, 2s, 4s, ...
+            print(
+                f"Upload of '{remote_path}' failed (attempt {attempt}/{max_attempts}): "
+                f"{e}. Retrying in {backoff}s..."
+            )
+            time.sleep(backoff)
+    raise last_error
+
+
 def process_video_depth(
     input_bucket: str,
     video_key: str,
@@ -226,13 +264,7 @@ def process_video_depth(
                 remote_upload_path = f"{output_prefix}/{frame_filename}"
 
                 save_exr_32bit(depth_frame, local_exr_path)
-
-                with open(local_exr_path, "rb") as exr_file:
-                    supabase.storage.from_(output_bucket).upload(
-                        file=exr_file,
-                        path=remote_upload_path,
-                        file_options={"cache-control": "3600", "upsert": "true"}
-                    )
+                upload_with_retry(supabase, output_bucket, remote_upload_path, local_exr_path)
                 # Delete each temp EXR right after upload rather than letting
                 # them pile up in tmp_dir for the whole job -- disk on these
                 # workers is small (a few GB free) and long videos can mean
