@@ -11,6 +11,22 @@ import Imath
 from supabase import create_client, Client
 import runpod
 
+# Prefer decord over cv2.VideoCapture for reading video frames. cv2's FFmpeg
+# backend can silently misreport a video's frame count and/or stop reading
+# early on certain files (confirmed in production: cv2 reported ~1449 frames
+# and stopped there on a video that actually has 8301) -- decord parses the
+# container directly and gives an accurate frame count and full access to
+# every frame. This matches upstream Video-Depth-Anything's own preference
+# (utils/dc_utils.py::read_video_frames() tries decord first, falls back to
+# cv2 only if decord isn't installed) -- decord is already in this image
+# because it's one of upstream's own dependencies.
+try:
+    from decord import VideoReader, cpu as decord_cpu
+    DECORD_AVAILABLE = True
+except ImportError:
+    DECORD_AVAILABLE = False
+    print("decord not available, falling back to cv2.VideoCapture for frame reading")
+
 # --- Blackwell (sm_120) workaround ---
 # xformers' bundled Flash-Attention-3 ("Hopper") kernel declares a minimum
 # compute capability of sm_90 with no upper bound, so xformers' dispatcher
@@ -189,7 +205,7 @@ def process_video_depth(
         with open(local_video_path, "wb") as f:
             f.write(video_bytes)
 
-        # 2-4. Stream frames from the video in bounded-size chunks, running
+        # 2-4. Read frames from the video in bounded-size chunks, running
         # inference and uploading each chunk's EXRs before moving on to the
         # next one, instead of holding the entire clip's frames and depth
         # output in memory at once. This keeps peak memory roughly constant
@@ -202,13 +218,18 @@ def process_video_depth(
         # whole clip were processed in one call. In practice that's a minor
         # seam every CHUNK_SIZE_FRAMES frames -- a much better tradeoff than
         # the job crashing outright on anything longer than a short clip.
-        cap = cv2.VideoCapture(local_video_path)
-        target_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total_frames_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
-        hint_suffix = f", ~{total_frames_hint} frames total" if total_frames_hint else ""
+        if DECORD_AVAILABLE:
+            vr = VideoReader(local_video_path, ctx=decord_cpu(0))
+            total_frames = len(vr)
+            target_fps = vr.get_avg_fps() or 30.0
+        else:
+            cap = cv2.VideoCapture(local_video_path)
+            target_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+        hint_suffix = f", {total_frames} frames total" if total_frames else ""
         print(
             f"[2-4/4] Processing video in chunks of {CHUNK_SIZE_FRAMES} frames "
-            f"(fps={target_fps}{hint_suffix})..."
+            f"(fps={target_fps}{hint_suffix}, reader={'decord' if DECORD_AVAILABLE else 'cv2'})..."
         )
 
         frame_index = 0
@@ -216,10 +237,16 @@ def process_video_depth(
 
         def flush_chunk(buffer):
             nonlocal frame_index, chunk_num
-            if not buffer:
+            if len(buffer) == 0:
                 return
             chunk_num += 1
-            chunk_frames = np.stack(buffer, axis=0)
+            # `buffer` is a plain list of per-frame arrays from the cv2 path,
+            # or an ndarray already shaped [N, H, W, 3] straight from
+            # decord's get_batch().asnumpy() -- decord already returns RGB
+            # (see utils/dc_utils.py: the decord branch does no color
+            # conversion, only the cv2 fallback branch does), so no
+            # cv2.cvtColor is needed here either way.
+            chunk_frames = np.stack(buffer, axis=0) if isinstance(buffer, list) else buffer
             n = len(chunk_frames)
             print(
                 f"[chunk {chunk_num}] Running depth inference on frames "
@@ -274,19 +301,24 @@ def process_video_depth(
 
             print(f"[chunk {chunk_num}] Uploaded {n} frame(s), {frame_index} total so far.")
 
-        buffer = []
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            buffer.append(frame)
-            if len(buffer) >= CHUNK_SIZE_FRAMES:
-                flush_chunk(buffer)
-                buffer = []
-        cap.release()
-
-        flush_chunk(buffer)
+        if DECORD_AVAILABLE:
+            for start in range(0, total_frames, CHUNK_SIZE_FRAMES):
+                end = min(start + CHUNK_SIZE_FRAMES, total_frames)
+                chunk = vr.get_batch(list(range(start, end))).asnumpy()
+                flush_chunk(chunk)
+        else:
+            buffer = []
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                buffer.append(frame)
+                if len(buffer) >= CHUNK_SIZE_FRAMES:
+                    flush_chunk(buffer)
+                    buffer = []
+            cap.release()
+            flush_chunk(buffer)
 
         if frame_index == 0:
             raise ValueError("No frames could be extracted from the provided video file.")
