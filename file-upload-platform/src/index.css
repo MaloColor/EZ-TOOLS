@@ -16,3 +16,13 @@ body {
     transform: rotate(360deg);
   }
 }
+
+.step-spinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid #e0e0e0;
+  border-top-color: #111111;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}

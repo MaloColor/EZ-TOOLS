@@ -420,10 +420,13 @@ function ProcessingView({ step }: { step: number }) {
         const textColor = done || active ? "#111111" : "#aaaaaa";
         return (
           <div key={label} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ ...styles.stepRing, borderColor: ringColor, background: fillColor }}>
-              {done && <CheckIcon />}
-              {active && <span style={styles.spinnerDot} />}
-            </span>
+            {active ? (
+              <span className="step-spinner" />
+            ) : (
+              <span style={{ ...styles.stepRing, borderColor: ringColor, background: fillColor }}>
+                {done && <CheckIcon />}
+              </span>
+            )}
             <span style={{ fontSize: 13, color: textColor }}>{label}</span>
           </div>
         );
@@ -928,13 +931,6 @@ const styles: Record<string, CSSProperties> = {
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-  },
-  spinnerDot: {
-    width: 8,
-    height: 8,
-    borderRadius: "50%",
-    background: "#111111",
-    animation: "spin 1s linear infinite",
   },
   doneCheckCircle: {
     width: 40,
