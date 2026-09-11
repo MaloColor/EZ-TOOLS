@@ -50,6 +50,7 @@ export default function App() {
   const [checking, setChecking] = useState(false);
   const [alreadyProcessed, setAlreadyProcessed] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragCounter = useRef(0);
 
   function reset() {
     setView("idle");
@@ -161,45 +162,54 @@ export default function App() {
   }
 
   const showFlow = overlay === "none";
-
-  const hasActiveSession = view === "configuring" || view === "processing" || view === "done";
-
-  function confirmSessionLoss(): boolean {
-    if (!hasActiveSession) return true;
-    const message =
-      view === "processing"
-        ? "A file is still processing. Switching tabs now means you'll lose track of this session and the result won't be saved for later — continue?"
-        : view === "done"
-        ? "You haven't downloaded your result yet. Switching tabs now will lose this session — continue?"
-        : "You have a file selected that hasn't been processed yet. Switching tabs now will lose this session — continue?";
-    return window.confirm(message);
-  }
-
-  function goTo(destructive: boolean, next: () => void) {
-    if (destructive && !confirmSessionLoss()) return;
-    next();
-  }
-
-  // Leaving the live flow (or resetting it) is the only case that can lose a session —
-  // switching between overlays that are already covering the flow loses nothing new.
-  const leavingFlow = overlay === "none";
+  const isDropTarget = showFlow && view === "idle";
 
   return (
     <div style={styles.page}>
       <Sidebar
         activeOverlay={overlay}
-        onUpload={() =>
-          goTo(hasActiveSession, () => {
-            setOverlay("none");
-            reset();
-          })
-        }
-        onAbout={() => goTo(leavingFlow, () => setOverlay(overlay === "about" ? "none" : "about"))}
-        onLogin={() => goTo(leavingFlow, () => setOverlay(overlay === "login" ? "none" : "login"))}
-        onSettings={() => goTo(leavingFlow, () => setOverlay(overlay === "settings" ? "none" : "settings"))}
+        onUpload={() => setOverlay("none")}
+        onAbout={() => setOverlay(overlay === "about" ? "none" : "about")}
+        onLogin={() => setOverlay(overlay === "login" ? "none" : "login")}
+        onSettings={() => setOverlay(overlay === "settings" ? "none" : "settings")}
       />
 
-      <main style={styles.main}>
+      <main
+        style={{ ...styles.main, background: dragOver && isDropTarget ? "#e9e9e9" : "#ffffff" }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          if (!isDropTarget) return;
+          dragCounter.current++;
+          setDragOver(true);
+        }}
+        onDragOver={(e) => e.preventDefault()}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          if (!isDropTarget) return;
+          dragCounter.current = Math.max(0, dragCounter.current - 1);
+          if (dragCounter.current === 0) setDragOver(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          dragCounter.current = 0;
+          setDragOver(false);
+          if (!isDropTarget) return;
+          pickFile(e.dataTransfer.files?.[0]);
+        }}
+      >
+        {!showFlow && (view === "done" || view === "error") && (
+          <div style={{ ...styles.sessionBanner, ...(view === "error" ? styles.sessionBannerError : {}) }}>
+            <span>
+              {view === "done"
+                ? "Your file is ready."
+                : "Something went wrong processing your file."}
+            </span>
+            <button onClick={() => setOverlay("none")} style={styles.sessionBannerLink}>
+              {view === "done" ? "Go back to download it" : "Go back for details"}
+            </button>
+          </div>
+        )}
+
         {showFlow && (
           <>
             {view === "idle" && (
@@ -209,19 +219,6 @@ export default function App() {
                 fileInputRef={fileInputRef}
                 onBrowseClick={() => fileInputRef.current?.click()}
                 onFileChange={(e) => pickFile(e.target.files?.[0])}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOver(true);
-                }}
-                onDragLeave={(e) => {
-                  e.preventDefault();
-                  setDragOver(false);
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDragOver(false);
-                  pickFile(e.dataTransfer.files?.[0]);
-                }}
               />
             )}
 
@@ -317,18 +314,12 @@ function IdleView({
   fileInputRef,
   onBrowseClick,
   onFileChange,
-  onDragOver,
-  onDragLeave,
-  onDrop,
 }: {
   dragOver: boolean;
   error: string | null;
   fileInputRef: React.RefObject<HTMLInputElement>;
   onBrowseClick: () => void;
   onFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
 }) {
   return (
     <div style={styles.centeredCol}>
@@ -337,9 +328,6 @@ function IdleView({
         Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
       </p>
       <div
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
         onClick={onBrowseClick}
         style={{
           ...styles.dropzone,
@@ -858,6 +846,39 @@ const styles: Record<string, CSSProperties> = {
     background: "#ffffff",
   },
   inlineError: { fontSize: 12, color: "#b3261e", marginTop: 12 },
+  sessionBanner: {
+    position: "absolute",
+    top: 16,
+    left: 24,
+    right: 24,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexWrap: "wrap",
+    gap: 8,
+    padding: "10px 16px",
+    borderRadius: 8,
+    background: "#f0f7f0",
+    border: "1px solid #b8dab8",
+    color: "#1a5c1a",
+    fontSize: 13,
+    textAlign: "center",
+  },
+  sessionBannerError: {
+    background: "#fbebea",
+    border: "1px solid #e8a6a1",
+    color: "#8a2c25",
+  },
+  sessionBannerLink: {
+    background: "none",
+    border: "none",
+    padding: 0,
+    font: "inherit",
+    fontWeight: 700,
+    color: "inherit",
+    textDecoration: "underline",
+    cursor: "pointer",
+  },
   card: {
     width: 600,
     maxWidth: "100%",
