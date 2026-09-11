@@ -750,8 +750,8 @@ const styles: Record<string, CSSProperties> = {
     alignItems: "flex-start",
     justifyContent: "space-between",
   },
-  navNumber: { fontSize: 10, fontWeight: 800, color: "#ffffff" },
-  navLabel: { fontSize: 10, fontWeight: 700, color: "#ffffff" },
+  navNumber: { fontSize: 14, fontWeight: 800, color: "#ffffff" },
+  navLabel: { fontSize: 15, fontWeight: 700, color: "#ffffff" },
   main: {
     flex: 1,
     height: "100%",
