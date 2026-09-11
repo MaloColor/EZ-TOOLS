@@ -347,8 +347,7 @@ function IdleView({
         onClick={onBrowseClick}
         style={{
           ...styles.dropzone,
-          borderColor: dragOver ? "#111111" : "#d8d8d8",
-          background: dragOver ? "#fafafa" : "#ffffff",
+          background: dragOver ? "#e9e9e9" : "#ffffff",
         }}
       >
         <div style={styles.dropIconBox}>
