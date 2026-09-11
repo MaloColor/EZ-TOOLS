@@ -122,17 +122,41 @@ export default function App() {
 
   const showFlow = overlay === "none";
 
+  const hasActiveSession = view === "configuring" || view === "processing" || view === "done";
+
+  function confirmSessionLoss(): boolean {
+    if (!hasActiveSession) return true;
+    const message =
+      view === "processing"
+        ? "A file is still processing. Switching tabs now means you'll lose track of this session and the result won't be saved for later — continue?"
+        : view === "done"
+        ? "You haven't downloaded your result yet. Switching tabs now will lose this session — continue?"
+        : "You have a file selected that hasn't been processed yet. Switching tabs now will lose this session — continue?";
+    return window.confirm(message);
+  }
+
+  function goTo(destructive: boolean, next: () => void) {
+    if (destructive && !confirmSessionLoss()) return;
+    next();
+  }
+
+  // Leaving the live flow (or resetting it) is the only case that can lose a session —
+  // switching between overlays that are already covering the flow loses nothing new.
+  const leavingFlow = overlay === "none";
+
   return (
     <div style={styles.page}>
       <Sidebar
         activeOverlay={overlay}
-        onUpload={() => {
-          setOverlay("none");
-          reset();
-        }}
-        onAbout={() => setOverlay(overlay === "about" ? "none" : "about")}
-        onLogin={() => setOverlay(overlay === "login" ? "none" : "login")}
-        onSettings={() => setOverlay(overlay === "settings" ? "none" : "settings")}
+        onUpload={() =>
+          goTo(hasActiveSession, () => {
+            setOverlay("none");
+            reset();
+          })
+        }
+        onAbout={() => goTo(leavingFlow, () => setOverlay(overlay === "about" ? "none" : "about"))}
+        onLogin={() => goTo(leavingFlow, () => setOverlay(overlay === "login" ? "none" : "login"))}
+        onSettings={() => goTo(leavingFlow, () => setOverlay(overlay === "settings" ? "none" : "settings"))}
       />
 
       <main style={styles.main}>
@@ -186,11 +210,9 @@ export default function App() {
           </>
         )}
 
-        {overlay === "about" && <AboutPanel onClose={() => setOverlay("none")} />}
-        {overlay === "login" && <LoginPanel onClose={() => setOverlay("none")} />}
-        {overlay === "settings" && (
-          <SettingsPanel notify={notify} onToggleNotify={() => setNotify((n) => !n)} onClose={() => setOverlay("none")} />
-        )}
+        {overlay === "about" && <AboutPanel />}
+        {overlay === "login" && <LoginPanel />}
+        {overlay === "settings" && <SettingsPanel notify={notify} onToggleNotify={() => setNotify((n) => !n)} />}
       </main>
     </div>
   );
@@ -211,11 +233,11 @@ function Sidebar({
   onLogin: () => void;
   onSettings: () => void;
 }) {
-  const items: Array<{ n: string; label: string; bg: string; onClick: () => void; active: boolean }> = [
-    { n: "01", label: "Upload", bg: "#161616", onClick: onUpload, active: activeOverlay === "none" },
-    { n: "02", label: "About", bg: "#3a3a3a", onClick: onAbout, active: activeOverlay === "about" },
-    { n: "03", label: "Sign in", bg: "#5c5c5c", onClick: onLogin, active: activeOverlay === "login" },
-    { n: "04", label: "Settings", bg: "#8a8a8a", onClick: onSettings, active: activeOverlay === "settings" },
+  const items: Array<{ n: string; label: string; bg: string; onClick: () => void; active: boolean; icon: React.ReactNode }> = [
+    { n: "01", label: "Upload", bg: "#161616", onClick: onUpload, active: activeOverlay === "none", icon: <UploadIcon stroke="#ffffff" /> },
+    { n: "02", label: "About", bg: "#3a3a3a", onClick: onAbout, active: activeOverlay === "about", icon: <PricingIcon /> },
+    { n: "03", label: "Sign in", bg: "#5c5c5c", onClick: onLogin, active: activeOverlay === "login", icon: <LoginIcon /> },
+    { n: "04", label: "Settings", bg: "#8a8a8a", onClick: onSettings, active: activeOverlay === "settings", icon: <GearIcon /> },
   ];
 
   return (
@@ -235,7 +257,7 @@ function Sidebar({
           >
             <div style={styles.navCardTop}>
               <span style={styles.navNumber}>{it.n}</span>
-              <ArrowIcon />
+              {it.icon}
             </div>
             <span style={styles.navLabel}>{it.label}</span>
           </button>
@@ -375,8 +397,21 @@ function ConfiguringView({
 }
 
 function ProcessingView({ step }: { step: number }) {
+  const total = STEP_LABELS.length;
+  const completedUnits = STEP_LABELS.reduce(
+    (acc, _label, i) => acc + (step > i ? 1 : step === i ? 0.5 : 0),
+    0
+  );
+  const percent = Math.min(100, Math.round((completedUnits / total) * 100));
+
   return (
-    <div style={{ ...styles.card, padding: "32px 24px" }}>
+    <div style={{ ...styles.card, padding: "32px 24px", gap: 24 }}>
+      <div>
+        <div style={styles.progressTrack}>
+          <div style={{ ...styles.progressFill, width: `${percent}%` }} />
+        </div>
+        <div style={styles.progressLabel}>{percent}%</div>
+      </div>
       {STEP_LABELS.map((label, i) => {
         const done = step > i;
         const active = step === i;
@@ -450,18 +485,15 @@ function ErrorView({ message, onReset }: { message: string; onReset: () => void 
 
 // ---------- Overlays ----------
 
-function PanelHeader({ title, onClose }: { title: string; onClose: () => void }) {
+function PanelHeader({ title }: { title: string }) {
   return (
     <div style={styles.panelHeader}>
       <h2 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>{title}</h2>
-      <button onClick={onClose} style={styles.smallIconButton}>
-        <CloseIcon size={14} />
-      </button>
     </div>
   );
 }
 
-function AboutPanel({ onClose }: { onClose: () => void }) {
+function AboutPanel() {
   const steps = [
     { n: 1, title: "Lorem ipsum upload", body: "Consectetur adipiscing elit, sed do eiusmod tempor incididunt." },
     { n: 2, title: "Dolore magna processing", body: "Ut enim ad minim veniam, quis nostrud exercitation ullamco." },
@@ -474,7 +506,7 @@ function AboutPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div style={styles.panelRoot}>
-      <PanelHeader title="About" onClose={onClose} />
+      <PanelHeader title="About" />
       <div style={styles.panelBody}>
         <div>
           <div style={styles.eyebrow}>How it works</div>
@@ -525,14 +557,9 @@ function AboutPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function LoginPanel({ onClose }: { onClose: () => void }) {
+function LoginPanel() {
   return (
     <div style={styles.panelRoot}>
-      <div style={{ display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
-        <button onClick={onClose} style={styles.smallIconButton}>
-          <CloseIcon size={14} />
-        </button>
-      </div>
       <div style={styles.loginCenter}>
         <div>
           <span style={styles.eyebrow}>Sign in</span>
@@ -556,15 +583,13 @@ function LoginPanel({ onClose }: { onClose: () => void }) {
 function SettingsPanel({
   notify,
   onToggleNotify,
-  onClose,
 }: {
   notify: boolean;
   onToggleNotify: () => void;
-  onClose: () => void;
 }) {
   return (
     <div style={styles.panelRoot}>
-      <PanelHeader title="Settings" onClose={onClose} />
+      <PanelHeader title="Settings" />
       <div style={styles.panelBody}>
         <div>
           <div style={styles.eyebrow}>Account</div>
@@ -604,19 +629,37 @@ function SettingsPanel({
 
 // ---------- Icons ----------
 
-function ArrowIcon() {
+function UploadIcon({ stroke = "#111111" }: { stroke?: string }) {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2">
-      <path d="M7 17 17 7M7 7h10v10" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth="1.6">
+      <path d="M12 16V4M12 4l-5 5M12 4l5 5" />
+      <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
     </svg>
   );
 }
 
-function UploadIcon() {
+function PricingIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="1.6">
-      <path d="M12 16V4M12 4l-5 5M12 4l5 5" />
-      <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </svg>
+  );
+}
+
+function LoginIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+      <path d="M10 17l5-5-5-5M15 12H3" />
+    </svg>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   );
 }
@@ -856,6 +899,25 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: 7,
     fontSize: 13,
     cursor: "pointer",
+  },
+  progressTrack: {
+    width: "100%",
+    height: 6,
+    borderRadius: 3,
+    background: "#eeeeee",
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    background: "#111111",
+    borderRadius: 3,
+    transition: "width .3s ease",
+  },
+  progressLabel: {
+    fontSize: 11,
+    color: "#999999",
+    marginTop: 6,
+    textAlign: "right",
   },
   stepRing: {
     width: 20,
