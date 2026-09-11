@@ -1,6 +1,8 @@
 import os
 import sys
 import glob
+import json
+import re
 import tempfile
 import time
 import cv2
@@ -184,6 +186,39 @@ def upload_with_retry(
     raise last_error
 
 
+FRAME_NAME_RE = re.compile(r"^frame_(\d+)\.exr$")
+
+
+def get_uploaded_frame_indices(supabase: Client, output_bucket: str, output_prefix: str) -> set[int]:
+    """Lists frame_NNNN.exr files already uploaded under this output_prefix.
+
+    output_prefix is now derived from the input video's content hash (plus
+    the davinci_safe flag) rather than a random UUID per job, so a retried
+    job for the same input lands on the exact same prefix a prior, possibly
+    incomplete, attempt used. That's what makes resuming meaningful -- we
+    can tell which frames a previous attempt already finished and skip
+    redoing them, instead of either re-running the whole video or (worse)
+    mistaking a partial result for a complete one.
+    """
+    existing: set[int] = set()
+    offset = 0
+    page_size = 1000
+    while True:
+        entries = supabase.storage.from_(output_bucket).list(
+            output_prefix, {"limit": page_size, "offset": offset}
+        )
+        if not entries:
+            break
+        for entry in entries:
+            m = FRAME_NAME_RE.match(entry.get("name", ""))
+            if m:
+                existing.add(int(m.group(1)))
+        if len(entries) < page_size:
+            break
+        offset += page_size
+    return existing
+
+
 def process_video_depth(
     input_bucket: str,
     video_key: str,
@@ -231,6 +266,18 @@ def process_video_depth(
             f"[2-4/4] Processing video in chunks of {CHUNK_SIZE_FRAMES} frames "
             f"(fps={target_fps}{hint_suffix}, reader={'decord' if DECORD_AVAILABLE else 'cv2'})..."
         )
+
+        # output_prefix is content-derived (see get_uploaded_frame_indices),
+        # so a retried job for the same video+setting lands here and can
+        # pick up where a prior, possibly-killed attempt left off instead of
+        # redoing frames that already made it to the output bucket.
+        uploaded_frames = get_uploaded_frame_indices(supabase, output_bucket, output_prefix)
+        if uploaded_frames:
+            print(
+                f"Found {len(uploaded_frames)} frame(s) already uploaded for this "
+                "output (resuming a prior attempt) -- will skip any chunk that's "
+                "already fully present."
+            )
 
         frame_index = 0
         chunk_num = 0
@@ -304,9 +351,18 @@ def process_video_depth(
         if DECORD_AVAILABLE:
             for start in range(0, total_frames, CHUNK_SIZE_FRAMES):
                 end = min(start + CHUNK_SIZE_FRAMES, total_frames)
+                if uploaded_frames and all(i in uploaded_frames for i in range(start, end)):
+                    print(f"[chunk] frames {start}-{end - 1} already uploaded, skipping.")
+                    frame_index = end
+                    continue
                 chunk = vr.get_batch(list(range(start, end))).asnumpy()
                 flush_chunk(chunk)
         else:
+            # cv2 has no reliable random-access seek here (see the DECORD_AVAILABLE
+            # comment at the top of this file), so unlike the decord path this
+            # can't skip decoding already-uploaded frames -- it re-decodes
+            # everything, but upload_with_retry's upsert makes re-uploading
+            # already-present frames a harmless no-op rather than a failure.
             buffer = []
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -322,6 +378,22 @@ def process_video_depth(
 
         if frame_index == 0:
             raise ValueError("No frames could be extracted from the provided video file.")
+
+        # Written only once every frame has actually made it to the output
+        # bucket -- the frontend's "already processed, skip straight to
+        # download" check looks for this exact marker rather than just any
+        # file existing, since a killed job can leave a partial set of
+        # frames behind that must NOT be mistaken for a finished result.
+        manifest = json.dumps({
+            "frame_count": frame_index,
+            "davinci_safe": davinci_safe,
+            "completed_at": time.time(),
+        }).encode("utf-8")
+        supabase.storage.from_(output_bucket).upload(
+            path=f"{output_prefix}/_complete.json",
+            file=manifest,
+            file_options={"content-type": "application/json", "upsert": "true"},
+        )
 
         print("Finished sequence generation and upload!")
 

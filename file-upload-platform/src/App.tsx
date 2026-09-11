@@ -105,9 +105,15 @@ export default function App() {
     const outputPrefix = `sequence_${contentHash}_${davinciSafe ? "dvsafe" : "raw"}`;
 
     try {
+      // The presence of the "_complete.json" marker -- written by the worker
+      // only once every frame has been uploaded -- is what "already
+      // processed" actually means. Checking for *any* file here would be
+      // wrong: a job that died partway through leaves some frames sitting in
+      // the bucket, and treating that as "done" would hand back a broken,
+      // incomplete result instead of finishing the job.
       const { data: existing, error: listError } = await supabase.storage
         .from(OUTPUT_BUCKET)
-        .list(outputPrefix, { limit: 1 });
+        .list(outputPrefix, { limit: 1, search: "_complete.json" });
       if (listError) throw listError;
 
       if (existing && existing.length > 0) {
@@ -121,10 +127,20 @@ export default function App() {
       setView("processing");
       setStep(0);
 
-      const { error: uploadError } = await supabase.storage
+      // Same content hash -> same input key, so skip re-uploading a video
+      // that's already sitting in the input bucket from a prior attempt
+      // (whether that attempt finished or died partway through).
+      const { data: existingInput, error: inputListError } = await supabase.storage
         .from(INPUT_BUCKET)
-        .upload(videoKey, file, { upsert: true });
-      if (uploadError) throw uploadError;
+        .list(`input/${contentHash}`, { limit: 1 });
+      if (inputListError) throw inputListError;
+
+      if (!existingInput || existingInput.length === 0) {
+        const { error: uploadError } = await supabase.storage
+          .from(INPUT_BUCKET)
+          .upload(videoKey, file, { upsert: true });
+        if (uploadError) throw uploadError;
+      }
 
       setStep(1);
       const { id: jobId } = await startJob({

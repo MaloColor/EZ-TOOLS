@@ -12,11 +12,15 @@ export async function downloadOutputAsZip(
   outputPrefix: string,
   zipName: string
 ): Promise<void> {
-  const { data: files, error: listError } = await supabase.storage
+  const { data: allFiles, error: listError } = await supabase.storage
     .from(outputBucket)
     .list(outputPrefix);
   if (listError) throw listError;
-  if (!files || files.length === 0) {
+  // "_complete.json" is a marker the worker writes to signal the job
+  // finished -- not part of the actual depth sequence, so it's excluded
+  // here rather than ending up bundled into the user's download.
+  const files = (allFiles ?? []).filter((f) => f.name !== "_complete.json");
+  if (files.length === 0) {
     throw new Error(`No output files found at ${outputBucket}/${outputPrefix}`);
   }
 
