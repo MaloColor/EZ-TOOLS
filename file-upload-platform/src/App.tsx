@@ -20,6 +20,17 @@ function sanitizeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+// Content hash of the file, used as a stable key so re-uploading the same
+// video (with the same DaVinci setting) maps to the same output location
+// instead of always kicking off a fresh RunPod job.
+async function sha256Hex(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 interface OutputInfo {
   prefix: string;
   baseName: string;
@@ -36,6 +47,8 @@ export default function App() {
   const [downloading, setDownloading] = useState(false);
   const [notify, setNotify] = useState(true);
   const [davinciSafe, setDavinciSafe] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [alreadyProcessed, setAlreadyProcessed] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function reset() {
@@ -44,6 +57,7 @@ export default function App() {
     setStep(-1);
     setError(null);
     setOutputInfo(null);
+    setAlreadyProcessed(false);
   }
 
   function pickFile(f: File | null | undefined) {
@@ -68,20 +82,47 @@ export default function App() {
       return;
     }
 
-    setView("processing");
-    setStep(0);
     setError(null);
+    setChecking(true);
 
-    const jobUuid = crypto.randomUUID();
-    // Shares one bucket with the output sequence — "input/" keeps the
-    // uploaded source video from colliding with its own "sequence_*" output.
-    const videoKey = `input/${jobUuid}/${sanitizeFileName(file.name)}`;
-    const outputPrefix = `sequence_${jobUuid}`;
+    // Deterministic on file content + the DaVinci setting (which changes the
+    // output itself, via normalization) rather than a random UUID, so the
+    // same video processed the same way always lands at the same output
+    // location -- that's what lets us detect "already processed" below
+    // instead of silently re-running the job every time.
+    const baseName = file.name.replace(/\.[^.]+$/, "");
+    let contentHash: string;
+    try {
+      contentHash = await sha256Hex(file);
+    } catch (e) {
+      setChecking(false);
+      setError(e instanceof Error ? e.message : "Couldn't read the file.");
+      setView("error");
+      return;
+    }
+    const videoKey = `input/${contentHash}/${sanitizeFileName(file.name)}`;
+    const outputPrefix = `sequence_${contentHash}_${davinciSafe ? "dvsafe" : "raw"}`;
 
     try {
+      const { data: existing, error: listError } = await supabase.storage
+        .from(OUTPUT_BUCKET)
+        .list(outputPrefix, { limit: 1 });
+      if (listError) throw listError;
+
+      if (existing && existing.length > 0) {
+        setOutputInfo({ prefix: outputPrefix, baseName });
+        setAlreadyProcessed(true);
+        setView("done");
+        return;
+      }
+
+      setAlreadyProcessed(false);
+      setView("processing");
+      setStep(0);
+
       const { error: uploadError } = await supabase.storage
         .from(INPUT_BUCKET)
-        .upload(videoKey, file);
+        .upload(videoKey, file, { upsert: true });
       if (uploadError) throw uploadError;
 
       setStep(1);
@@ -97,14 +138,13 @@ export default function App() {
         if (status === "IN_PROGRESS") setStep(2);
       });
 
-      setOutputInfo({
-        prefix: outputPrefix,
-        baseName: file.name.replace(/\.[^.]+$/, ""),
-      });
+      setOutputInfo({ prefix: outputPrefix, baseName });
       setView("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
       setView("error");
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -192,6 +232,7 @@ export default function App() {
                 onSetDavinciSafe={setDavinciSafe}
                 onReset={reset}
                 onStart={startProcessing}
+                checking={checking}
               />
             )}
 
@@ -201,6 +242,7 @@ export default function App() {
               <DoneView
                 outputInfo={outputInfo}
                 downloading={downloading}
+                alreadyProcessed={alreadyProcessed}
                 onReset={reset}
                 onDownload={handleDownload}
               />
@@ -327,12 +369,14 @@ function ConfiguringView({
   onSetDavinciSafe,
   onReset,
   onStart,
+  checking,
 }: {
   file: File;
   davinciSafe: boolean;
   onSetDavinciSafe: (value: boolean) => void;
   onReset: () => void;
   onStart: () => void;
+  checking: boolean;
 }) {
   return (
     <div style={styles.card}>
@@ -389,8 +433,8 @@ function ConfiguringView({
         </div>
       </div>
 
-      <button onClick={onStart} style={styles.primaryButton}>
-        Process file
+      <button onClick={onStart} disabled={checking} style={styles.primaryButton}>
+        {checking ? "Checking…" : "Process file"}
       </button>
     </div>
   );
@@ -438,11 +482,13 @@ function ProcessingView({ step }: { step: number }) {
 function DoneView({
   outputInfo,
   downloading,
+  alreadyProcessed,
   onReset,
   onDownload,
 }: {
   outputInfo: OutputInfo;
   downloading: boolean;
+  alreadyProcessed: boolean;
   onReset: () => void;
   onDownload: () => void;
 }) {
@@ -452,7 +498,15 @@ function DoneView({
         <CheckIcon size={18} stroke="#ffffff" width={2.5} />
       </div>
       <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: 15, fontWeight: 600 }}>Your file is ready</div>
+        <div style={{ fontSize: 15, fontWeight: 600 }}>
+          {alreadyProcessed ? "Already processed — ready to download" : "Your file is ready"}
+        </div>
+        {alreadyProcessed && (
+          <div style={{ fontSize: 11, color: "#999999", marginTop: 2 }}>
+            This exact file (with the same DaVinci setting) was processed before, so we
+            skipped straight to your existing result.
+          </div>
+        )}
         <div style={{ fontSize: 13, color: "#666666", marginTop: 4 }}>
           {outputInfo.baseName}_depth.zip
         </div>
