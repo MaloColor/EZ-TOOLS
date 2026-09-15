@@ -8,8 +8,6 @@ import time
 import cv2
 import torch
 import numpy as np
-import OpenEXR
-import Imath
 from supabase import create_client, Client
 import runpod
 
@@ -136,17 +134,18 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     return MODEL, DEVICE
 
 
-def save_exr_32bit(depth_map: np.ndarray, output_path: str):
-    """Saves a 2D float32 numpy array as a single-channel 32-bit Float EXR image."""
-    height, width = depth_map.shape
-    depth_float32 = depth_map.astype(np.float32)
+def save_depth_png16(depth_map: np.ndarray, output_path: str):
+    """Saves a 2D depth array as a 16-bit grayscale PNG.
 
-    header = OpenEXR.Header(width, height)
-    header['channels'] = {'Z': Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))}
-
-    out = OpenEXR.OutputFile(output_path, header)
-    out.writePixels({'Z': depth_float32.tobytes()})
-    out.close()
+    Expects values already normalized to [0, 1] (see process_video_depth) --
+    PNG has no way to store unbounded float like the EXR output this
+    replaced, only a fixed, bounded integer range. 16-bit (65,536 levels)
+    keeps gradients smooth (no visible banding) while still being far
+    smaller and more broadly compatible than 32-bit float EXR.
+    """
+    depth_uint16 = np.clip(depth_map, 0.0, 1.0)
+    depth_uint16 = (depth_uint16 * 65535.0 + 0.5).astype(np.uint16)
+    cv2.imwrite(output_path, depth_uint16)
 
 
 def upload_with_retry(
@@ -166,9 +165,9 @@ def upload_with_retry(
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            with open(local_path, "rb") as exr_file:
+            with open(local_path, "rb") as upload_file:
                 supabase.storage.from_(bucket).upload(
-                    file=exr_file,
+                    file=upload_file,
                     path=remote_path,
                     file_options={"cache-control": "3600", "upsert": "true"}
                 )
@@ -186,11 +185,11 @@ def upload_with_retry(
     raise last_error
 
 
-FRAME_NAME_RE = re.compile(r"^frame_(\d+)\.exr$")
+FRAME_NAME_RE = re.compile(r"^frame_(\d+)\.png$")
 
 
 def get_uploaded_frame_indices(supabase: Client, output_bucket: str, output_prefix: str) -> set[int]:
-    """Lists frame_NNNN.exr files already uploaded under this output_prefix.
+    """Lists frame_NNNN.png files already uploaded under this output_prefix.
 
     output_prefix is now derived from the input video's content hash (plus
     the davinci_safe flag) rather than a random UUID per job, so a retried
@@ -231,8 +230,8 @@ def process_video_depth(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_video_path = os.path.join(tmp_dir, "input.mp4")
-        exr_output_dir = os.path.join(tmp_dir, "exr_frames")
-        os.makedirs(exr_output_dir, exist_ok=True)
+        frame_output_dir = os.path.join(tmp_dir, "depth_frames")
+        os.makedirs(frame_output_dir, exist_ok=True)
 
         # 1. Download Video
         print(f"[1/4] Downloading '{video_key}' from bucket '{input_bucket}'...")
@@ -241,7 +240,7 @@ def process_video_depth(
             f.write(video_bytes)
 
         # 2-4. Read frames from the video in bounded-size chunks, running
-        # inference and uploading each chunk's EXRs before moving on to the
+        # inference and uploading each chunk's PNGs before moving on to the
         # next one, instead of holding the entire clip's frames and depth
         # output in memory at once. This keeps peak memory roughly constant
         # regardless of video length.
@@ -317,33 +316,39 @@ def process_video_depth(
             if device == "cuda":
                 torch.cuda.empty_cache()
 
-            if davinci_safe:
-                depth_min = float(chunk_depths.min())
-                depth_max = float(chunk_depths.max())
-                depth_range = max(depth_max - depth_min, 1e-6)
-                chunk_depths = (chunk_depths - depth_min) / depth_range
+            # PNG can only hold a bounded, fixed-precision range -- unlike
+            # the EXR output this replaced, there's no way to write
+            # unbounded float "raw" depth to a 16-bit PNG. Always normalize
+            # per chunk to [0, 1] regardless of davinci_safe; the flag is
+            # still accepted (and recorded in the manifest below) for
+            # compatibility with existing callers, but it no longer changes
+            # what gets written -- there's only one output now.
+            depth_min = float(chunk_depths.min())
+            depth_max = float(chunk_depths.max())
+            depth_range = max(depth_max - depth_min, 1e-6)
+            chunk_depths = (chunk_depths - depth_min) / depth_range
+            print(
+                f"[chunk {chunk_num}] Normalized depth range "
+                f"[{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]"
+            )
+            if not davinci_safe:
                 print(
-                    f"[chunk {chunk_num}] Normalized depth range "
-                    f"[{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]"
-                )
-            else:
-                print(
-                    f"[chunk {chunk_num}] Skipping normalization (davinci_safe=False) "
-                    f"— raw depth range [{chunk_depths.min():.4f}, {chunk_depths.max():.4f}]"
+                    f"[chunk {chunk_num}] Note: davinci_safe=False was requested, "
+                    "but PNG output requires a bounded range -- normalizing anyway."
                 )
 
             for depth_frame in chunk_depths:
-                frame_filename = f"frame_{frame_index:04d}.exr"
-                local_exr_path = os.path.join(exr_output_dir, frame_filename)
+                frame_filename = f"frame_{frame_index:04d}.png"
+                local_frame_path = os.path.join(frame_output_dir, frame_filename)
                 remote_upload_path = f"{output_prefix}/{frame_filename}"
 
-                save_exr_32bit(depth_frame, local_exr_path)
-                upload_with_retry(supabase, output_bucket, remote_upload_path, local_exr_path)
-                # Delete each temp EXR right after upload rather than letting
-                # them pile up in tmp_dir for the whole job -- disk on these
-                # workers is small (a few GB free) and long videos can mean
-                # thousands of frames.
-                os.remove(local_exr_path)
+                save_depth_png16(depth_frame, local_frame_path)
+                upload_with_retry(supabase, output_bucket, remote_upload_path, local_frame_path)
+                # Delete each temp frame right after upload rather than
+                # letting them pile up in tmp_dir for the whole job -- disk
+                # on these workers is small (a few GB free) and long videos
+                # can mean thousands of frames.
+                os.remove(local_frame_path)
                 frame_index += 1
 
             print(f"[chunk {chunk_num}] Uploaded {n} frame(s), {frame_index} total so far.")
@@ -386,6 +391,7 @@ def process_video_depth(
         # frames behind that must NOT be mistaken for a finished result.
         manifest = json.dumps({
             "frame_count": frame_index,
+            "format": "png16",
             "davinci_safe": davinci_safe,
             "completed_at": time.time(),
         }).encode("utf-8")
