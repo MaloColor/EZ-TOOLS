@@ -9,13 +9,12 @@ FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies required by OpenCV, OpenEXR, and Git
+# Install system dependencies required by OpenCV and Git
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
     libgl1-mesa-glx \
     libglib2.0-0 \
-    libopenexr-dev \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,14 +27,14 @@ WORKDIR /app
 # `from video_depth_anything.video_depth import VideoDepthAnything` raises
 # ImportError and the worker never starts. einops is pinned to match the
 # version Video-Depth-Anything's own requirements.txt was built against.
+# Depth output is written as 16-bit PNG (via opencv), not EXR -- no OpenEXR/
+# Imath bindings needed.
 RUN pip install --no-cache-dir \
     "einops==0.4.1" \
     "numpy<2.0.0" \
     runpod \
     supabase \
     opencv-python-headless \
-    OpenEXR \
-    Imath \
     pillow \
     easydict \
     "xformers==0.0.30" \
