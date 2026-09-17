@@ -265,6 +265,25 @@ def process_video_depth(
             f"[2-4/4] Processing video in chunks of {CHUNK_SIZE_FRAMES} frames "
             f"(fps={target_fps}{hint_suffix}, reader={'decord' if DECORD_AVAILABLE else 'cv2'})..."
         )
+        # Deliberately loud and easy to grep in RunPod logs -- this is the
+        # single number everything else in this job depends on. If the
+        # implied duration here looks wrong for the source video (e.g. the
+        # video is visibly ~10s but this says ~3s), decord/cv2 misread the
+        # container -- the same class of bug noted above where cv2 once
+        # reported ~1449 frames on a video that actually had 8301 -- and every
+        # downstream count (chunks, uploaded frames, the final manifest) will
+        # be wrong in exactly the same way, since nothing after this line
+        # re-verifies it against the source file.
+        if total_frames:
+            implied_duration = total_frames / target_fps
+            print(
+                f"[FRAME COUNT] reader={'decord' if DECORD_AVAILABLE else 'cv2'} detected "
+                f"total_frames={total_frames} at fps={target_fps:.3f} "
+                f"(implies ~{implied_duration:.2f}s of video) -- this number drives every "
+                "chunk boundary and the final frame_count written to _complete.json."
+            )
+        else:
+            print("[FRAME COUNT] WARNING: total_frames could not be determined up front (cv2 fallback, unknown count).")
 
         # output_prefix is content-derived (see get_uploaded_frame_indices),
         # so a retried job for the same video+setting lands here and can
@@ -383,6 +402,20 @@ def process_video_depth(
 
         if frame_index == 0:
             raise ValueError("No frames could be extracted from the provided video file.")
+
+        # Sanity check against the number this job started with (see
+        # [FRAME COUNT] above). These SHOULD always match for the decord path
+        # -- the chunk loop always covers range(0, total_frames) in full --
+        # so a mismatch here means something upstream silently stopped the
+        # loop early rather than raising, and frame_count below is about to
+        # be written into _complete.json as if it were correct anyway.
+        if total_frames and frame_index != total_frames:
+            print(
+                f"[FRAME COUNT] WARNING: uploaded {frame_index} frame(s) but total_frames "
+                f"was {total_frames} at the start of this job -- _complete.json is about to "
+                f"claim frame_count={frame_index}, which will look 'complete' to the frontend "
+                "even though it doesn't match what this video was expected to produce."
+            )
 
         # Written only once every frame has actually made it to the output
         # bucket -- the frontend's "already processed, skip straight to

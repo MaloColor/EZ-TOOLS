@@ -33,6 +33,7 @@ export async function readOutputManifest(
   if (!Number.isInteger(manifest.frame_count) || manifest.frame_count < 1) {
     throw new Error("Invalid _complete.json: frame_count must be a positive integer.");
   }
+  console.log(`[download-zip] manifest at ${outputPrefix}/_complete.json:`, manifest);
   return manifest;
 }
 
@@ -55,17 +56,32 @@ async function listOutputFrameFiles(
     if (listError) throw listError;
     if (!page || page.length === 0) break;
     allFiles.push(...page);
+    console.log(
+      `[download-zip] list(${outputPrefix}) page at offset=${offset}: ${page.length} item(s) (running total ${allFiles.length})`
+    );
     if (page.length < LIST_PAGE_SIZE) break;
     offset += LIST_PAGE_SIZE;
   }
 
-  return allFiles
+  const frames = allFiles
     .map((f) => {
       const m = FRAME_NAME_RE.exec(f.name);
       return m ? { name: f.name, index: parseInt(m[1], 10) } : null;
     })
     .filter((x): x is { name: string; index: number } => x !== null)
     .sort((a, b) => a.index - b.index);
+
+  const nonFrameFiles = allFiles.filter((f) => !FRAME_NAME_RE.test(f.name)).map((f) => f.name);
+  console.log(
+    `[download-zip] ${outputPrefix}: ${allFiles.length} object(s) listed, ${frames.length} match frame_NNNN.png` +
+      (nonFrameFiles.length ? `, ${nonFrameFiles.length} non-frame file(s): ${nonFrameFiles.join(", ")}` : "")
+  );
+  if (frames.length > 0) {
+    console.log(
+      `[download-zip] frame index range: ${frames[0].index}..${frames[frames.length - 1].index}`
+    );
+  }
+  return frames;
 }
 
 /**
@@ -77,6 +93,19 @@ export function assertOutputMatchesManifest(
   frame_count: number
 ): void {
   if (frames.length !== frame_count) {
+    // Which specific indices are missing, not just the count -- "98 of 300,
+    // missing 98..299" (worker stopped early) reads very differently from
+    // scattered gaps (a few uploads that failed mid-job), and this is the
+    // one place that can tell the two apart.
+    const present = new Set(frames.map((f) => f.index));
+    const missing: number[] = [];
+    for (let i = 0; i < frame_count && missing.length < 20; i++) {
+      if (!present.has(i)) missing.push(i);
+    }
+    console.error(
+      `[download-zip] MISMATCH: storage has ${frames.length} frame(s), manifest says ${frame_count}.`,
+      `First missing indices: [${missing.join(", ")}${missing.length >= 20 ? ", ..." : ""}]`
+    );
     throw new Error(
       `Job output has ${frames.length} frame file(s) in storage but _complete.json says ${frame_count}. Re-run processing to refresh the output.`
     );
@@ -84,11 +113,16 @@ export function assertOutputMatchesManifest(
   for (let i = 0; i < frame_count; i++) {
     const expected = `frame_${String(i).padStart(4, "0")}.png`;
     if (frames[i].index !== i || frames[i].name !== expected) {
+      console.error(
+        `[download-zip] ORDER MISMATCH at position ${i}: expected ${expected}, found`,
+        frames[i]
+      );
       throw new Error(
         `Job output is missing or out of order at ${expected}. Re-run processing to refresh the output.`
       );
     }
   }
+  console.log(`[download-zip] verified: ${frame_count} frame(s) match manifest exactly.`);
 }
 
 /** Manifest + storage check; use for UI before offering download. */
