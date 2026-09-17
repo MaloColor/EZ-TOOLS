@@ -7,6 +7,7 @@ type View = "idle" | "configuring" | "processing" | "done" | "error";
 type Overlay = "none" | "about" | "login" | "settings";
 
 const MAX_BYTES = 100 * 1024 * 1024;
+const MAX_DURATION_SECONDS = 60;
 const OUTPUT_FORMAT_LABEL = "EXR Depth Sequence";
 const STEP_LABELS = ["Uploading", "Analyzing", "Preparing output"];
 
@@ -14,6 +15,32 @@ function formatSize(bytes: number): string {
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(0)} KB`;
   return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Reads a video file's length by loading its metadata into an off-DOM
+// <video> element -- File objects carry no duration themselves, this is
+// the only way to get it without uploading the file anywhere first.
+function getVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    const url = URL.createObjectURL(file);
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(video.duration);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Couldn't read this file's video metadata."));
+    };
+    video.src = url;
+  });
 }
 
 function sanitizeFileName(name: string): string {
@@ -61,13 +88,26 @@ export default function App() {
     setAlreadyProcessed(false);
   }
 
-  function pickFile(f: File | null | undefined) {
+  async function pickFile(f: File | null | undefined) {
     if (!f) return;
     if (f.size > MAX_BYTES) {
       setError(`"${f.name}" is ${formatSize(f.size)} — max is 100MB.`);
       return;
     }
+
     setError(null);
+    let duration: number;
+    try {
+      duration = await getVideoDuration(f);
+    } catch {
+      setError(`Couldn't read "${f.name}" — try a different file.`);
+      return;
+    }
+    if (duration > MAX_DURATION_SECONDS) {
+      setError(`"${f.name}" is ${formatDuration(duration)} long — max is 1 minute.`);
+      return;
+    }
+
     setFile(f);
     setView("configuring");
   }
@@ -356,7 +396,7 @@ function IdleView({
         <div>
           <div style={{ fontSize: 14, fontWeight: 500 }}>Drag a file here or click to browse</div>
           <div style={{ fontSize: 10, color: "#999999", marginTop: 4 }}>
-            Outputs as {OUTPUT_FORMAT_LABEL} — up to 100MB
+            Outputs as {OUTPUT_FORMAT_LABEL} — up to 1 minute, 100MB
           </div>
         </div>
         <input ref={fileInputRef} type="file" accept="video/*" onChange={onFileChange} style={{ display: "none" }} />
