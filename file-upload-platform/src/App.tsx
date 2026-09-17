@@ -385,7 +385,7 @@ function IdleView({
 }) {
   return (
     <div style={styles.centeredCol}>
-      <h1 style={styles.h1}>Lorem ipsum dolor sit amet</h1>
+      <h1 style={styles.h1}>Michael Jackson</h1>
       <p style={styles.leadText}>
         Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
       </p>
