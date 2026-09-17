@@ -2,8 +2,10 @@
 // bypassing the deployed frontend entirely, so we can see ground truth
 // regardless of any browser cache / stale-deployment question.
 //
-// Usage:
-//   SUPABASE_URL=... SUPABASE_ANON_KEY=... OUTPUT_PREFIX=sequence_xxx_dvsafe node inspect-real-bucket.mjs
+// HOW TO USE: paste your three values into the three lines below (between
+// the quotes), save the file, then from inside the file-upload-platform/
+// folder (this file's own folder) run:
+//   node inspect-real-bucket.mjs
 //
 // Mirrors the exact logic in file-upload-platform/src/lib/downloadZip.ts:
 // reads _complete.json, pages through list() fully, reports any mismatch
@@ -11,13 +13,19 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-const OUTPUT_PREFIX = process.env.OUTPUT_PREFIX;
+// ============ EDIT THESE THREE VALUES ============
+const SUPABASE_URL = "";        // e.g. "https://abcdefghijk.supabase.co"
+const SUPABASE_ANON_KEY = "";   // the long "anon" / "public" key from Supabase Settings -> API
+const OUTPUT_PREFIX = "";       // e.g. "sequence_5f70bf18a086.../_dvsafe" (the job's folder name in Storage)
+// ===================================================
+
 const OUTPUT_BUCKET = process.env.OUTPUT_BUCKET || "depth-outputs";
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !OUTPUT_PREFIX) {
-  console.error("Missing required env vars: SUPABASE_URL, SUPABASE_ANON_KEY, OUTPUT_PREFIX");
+  console.error(
+    "Missing values -- open inspect-real-bucket.mjs and paste your SUPABASE_URL, " +
+      "SUPABASE_ANON_KEY, and OUTPUT_PREFIX into the three quoted strings near the top of the file, then save and re-run."
+  );
   process.exit(1);
 }
 
