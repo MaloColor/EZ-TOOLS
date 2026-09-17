@@ -1,25 +1,46 @@
 import JSZip from "jszip";
 import { supabase } from "./supabaseClient";
 
-const LIST_PAGE_SIZE = 1000; // Supabase storage .list() only returns up to `limit` items per call (default 100)
-const DOWNLOAD_CONCURRENCY = 12; // parallel per-frame downloads, not one-at-a-time
+const LIST_PAGE_SIZE = 1000;
+const DOWNLOAD_CONCURRENCY = 12;
+const FRAME_NAME_RE = /^frame_(\d+)\.png$/;
 
-/**
- * Lists every file the worker wrote under `outputBucket/outputPrefix`,
- * downloads each blob, and packages them into a single zip the browser saves
- * as `${zipName}.zip` — the worker uploads one file per frame, not one file,
- * so this is what makes the design's single "Download" button truthful.
- */
-export async function downloadOutputAsZip(
+export interface OutputManifest {
+  frame_count: number;
+  format?: string;
+  davinci_safe?: boolean;
+  completed_at?: number;
+}
+
+/** Worker-written manifest under the output prefix. */
+export async function readOutputManifest(
   outputBucket: string,
-  outputPrefix: string,
-  zipName: string
-): Promise<void> {
-  // list() is paginated -- a single call caps out at `limit` (default 100)
-  // results, which is why only ~100 of a real sequence's hundreds or
-  // thousands of frames were coming back before. Page through with
-  // limit/offset until a page comes back short of a full page, which means
-  // we've reached the end. sortBy keeps frame order stable across pages.
+  outputPrefix: string
+): Promise<OutputManifest> {
+  const path = `${outputPrefix}/_complete.json`;
+  const { data, error } = await supabase.storage.from(outputBucket).download(path);
+  if (error) {
+    throw new Error(
+      "Output isn't ready for download (missing _complete.json). The job may still be running or failed partway through."
+    );
+  }
+  let manifest: OutputManifest;
+  try {
+    manifest = JSON.parse(await data.text()) as OutputManifest;
+  } catch {
+    throw new Error("Invalid _complete.json in storage.");
+  }
+  if (!Number.isInteger(manifest.frame_count) || manifest.frame_count < 1) {
+    throw new Error("Invalid _complete.json: frame_count must be a positive integer.");
+  }
+  return manifest;
+}
+
+/** Every frame_*.png the worker wrote under this output prefix (paginated list). */
+async function listOutputFrameFiles(
+  outputBucket: string,
+  outputPrefix: string
+): Promise<{ name: string; index: number }[]> {
   const allFiles: { name: string }[] = [];
   let offset = 0;
   // eslint-disable-next-line no-constant-condition
@@ -34,46 +55,92 @@ export async function downloadOutputAsZip(
     if (listError) throw listError;
     if (!page || page.length === 0) break;
     allFiles.push(...page);
-    if (page.length < LIST_PAGE_SIZE) break; // last page
+    if (page.length < LIST_PAGE_SIZE) break;
     offset += LIST_PAGE_SIZE;
   }
 
-  // "_complete.json" is a marker the worker writes to signal the job
-  // finished -- not part of the actual depth sequence, so it's excluded
-  // here rather than ending up bundled into the user's download.
-  const files = allFiles.filter((f) => f.name !== "_complete.json");
-  if (files.length === 0) {
-    throw new Error(`No output files found at ${outputBucket}/${outputPrefix}`);
+  return allFiles
+    .map((f) => {
+      const m = FRAME_NAME_RE.exec(f.name);
+      return m ? { name: f.name, index: parseInt(m[1], 10) } : null;
+    })
+    .filter((x): x is { name: string; index: number } => x !== null)
+    .sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Ensures storage output matches the completed job manifest before zipping —
+ * same files, same count, contiguous frame_0000 … frame_NNNN sequence.
+ */
+export function assertOutputMatchesManifest(
+  frames: { name: string; index: number }[],
+  frame_count: number
+): void {
+  if (frames.length !== frame_count) {
+    throw new Error(
+      `Job output has ${frames.length} frame file(s) in storage but _complete.json says ${frame_count}. Re-run processing to refresh the output.`
+    );
   }
+  for (let i = 0; i < frame_count; i++) {
+    const expected = `frame_${String(i).padStart(4, "0")}.png`;
+    if (frames[i].index !== i || frames[i].name !== expected) {
+      throw new Error(
+        `Job output is missing or out of order at ${expected}. Re-run processing to refresh the output.`
+      );
+    }
+  }
+}
+
+/** Manifest + storage check; use for UI before offering download. */
+export async function getVerifiedOutputFrameCount(
+  outputBucket: string,
+  outputPrefix: string
+): Promise<number> {
+  const manifest = await readOutputManifest(outputBucket, outputPrefix);
+  const frames = await listOutputFrameFiles(outputBucket, outputPrefix);
+  assertOutputMatchesManifest(frames, manifest.frame_count);
+  return manifest.frame_count;
+}
+
+/**
+ * Reads the completed job manifest, verifies every listed output frame exists
+ * in storage, then zips exactly those PNGs (nothing else from the bucket).
+ */
+export async function downloadOutputAsZip(
+  outputBucket: string,
+  outputPrefix: string,
+  zipName: string
+): Promise<void> {
+  const manifest = await readOutputManifest(outputBucket, outputPrefix);
+  const frames = await listOutputFrameFiles(outputBucket, outputPrefix);
+  assertOutputMatchesManifest(frames, manifest.frame_count);
 
   const zip = new JSZip();
-
-  // Downloading one frame at a time made total time roughly (per-request
-  // latency) x (frame count) -- almost all of that is network round-trip
-  // wait, not actual transfer, for a sequence that can run to thousands of
-  // small files. A small worker pool overlaps those round trips instead of
-  // serializing them. DOWNLOAD_CONCURRENCY is deliberately well under
-  // typical HTTP/2-per-host multiplexing limits, so this doesn't need to be
-  // pushed higher to be effective.
   let nextIndex = 0;
+
   async function downloadWorker() {
-    while (nextIndex < files.length) {
-      const file = files[nextIndex++];
+    while (nextIndex < frames.length) {
+      const index = nextIndex++;
+      const file = frames[index];
       const path = `${outputPrefix}/${file.name}`;
       const { data: blob, error } = await supabase.storage.from(outputBucket).download(path);
-      if (error) throw error;
+      if (error) {
+        throw new Error(
+          `Could not read ${file.name} from job output (frame ${index + 1} of ${manifest.frame_count}).`
+        );
+      }
       zip.file(file.name, blob);
     }
   }
+
   await Promise.all(
-    Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, files.length) }, downloadWorker)
+    Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, frames.length) }, downloadWorker)
   );
 
-  // JSZip already defaults to STORE (no compression) when `compression`
-  // isn't passed, but it's worth being explicit: these frames are already
-  // dense pixel data (PNG carries its own internal compression) that gains
-  // essentially nothing from a second DEFLATE pass, at real CPU cost across
-  // a sequence this size.
+  if (Object.keys(zip.files).length !== manifest.frame_count) {
+    throw new Error("Zip did not include every output frame — download aborted.");
+  }
+
   const zipBlob = await zip.generateAsync({ type: "blob", compression: "STORE" });
   const url = URL.createObjectURL(zipBlob);
   const a = document.createElement("a");

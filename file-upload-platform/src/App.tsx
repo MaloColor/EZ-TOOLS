@@ -1,7 +1,7 @@
 import { useRef, useState, type CSSProperties } from "react";
 import { supabase, isSupabaseConfigured, INPUT_BUCKET, OUTPUT_BUCKET } from "./lib/supabaseClient";
 import { startJob, pollJobUntilDone, type JobStatus } from "./lib/job";
-import { downloadOutputAsZip } from "./lib/downloadZip";
+import { downloadOutputAsZip, getVerifiedOutputFrameCount } from "./lib/downloadZip";
 
 type View = "idle" | "configuring" | "processing" | "done" | "error";
 type Overlay = "none" | "about" | "login" | "settings";
@@ -61,6 +61,12 @@ async function sha256Hex(file: File): Promise<string> {
 interface OutputInfo {
   prefix: string;
   baseName: string;
+  frameCount: number;
+}
+
+async function outputInfoForJob(prefix: string, baseName: string): Promise<OutputInfo> {
+  const frameCount = await getVerifiedOutputFrameCount(OUTPUT_BUCKET, prefix);
+  return { prefix, baseName, frameCount };
 }
 
 export default function App() {
@@ -157,7 +163,7 @@ export default function App() {
       if (listError) throw listError;
 
       if (existing && existing.length > 0) {
-        setOutputInfo({ prefix: outputPrefix, baseName });
+        setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
         setAlreadyProcessed(true);
         setView("done");
         return;
@@ -195,7 +201,7 @@ export default function App() {
         if (status === "IN_PROGRESS") setStep(2);
       });
 
-      setOutputInfo({ prefix: outputPrefix, baseName });
+      setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
       setView("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
@@ -551,7 +557,7 @@ function DoneView({
           </div>
         )}
         <div style={{ fontSize: 13, color: "#666666", marginTop: 4 }}>
-          {outputInfo.baseName}_depth.zip
+          {outputInfo.baseName}_depth.zip · {outputInfo.frameCount} frames (matches job output)
         </div>
       </div>
       <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
