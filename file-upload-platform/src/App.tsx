@@ -398,10 +398,10 @@ function IdleView({
           <div style={{ fontSize: 10, color: "#999999", marginTop: 4 }}>
             Outputs as {OUTPUT_FORMAT_LABEL} — up to 1 minute, 100MB
           </div>
+          {error && <div style={styles.inlineError}>{error}</div>}
         </div>
         <input ref={fileInputRef} type="file" accept="video/*" onChange={onFileChange} style={{ display: "none" }} />
       </div>
-      {error && <div style={styles.inlineError}>{error}</div>}
     </div>
   );
 }
@@ -900,7 +900,7 @@ const styles: Record<string, CSSProperties> = {
     justifyContent: "center",
     background: "#ffffff",
   },
-  inlineError: { fontSize: 12, color: "#b3261e", marginTop: 12 },
+  inlineError: { fontSize: 12, color: "#b3261e", marginTop: 8 },
   sessionBanner: {
     position: "absolute",
     top: 16,
