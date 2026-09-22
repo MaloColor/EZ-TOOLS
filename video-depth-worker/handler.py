@@ -308,10 +308,16 @@ def process_video_depth(
 
         frame_index = 0
         chunk_num = 0
+        # Running normalization range from prior chunks, used to smooth the
+        # depth range across chunk boundaries (see flush_chunk below) so
+        # consecutive chunks don't snap to a different brightness/contrast
+        # at the seam. None until the first chunk has been processed.
+        prev_depth_min = None
+        prev_depth_max = None
         report_progress()  # initial 0/total_frames so the frontend has a real number immediately
 
         def flush_chunk(buffer):
-            nonlocal frame_index, chunk_num
+            nonlocal frame_index, chunk_num, prev_depth_min, prev_depth_max
             if len(buffer) == 0:
                 return
             chunk_num += 1
@@ -352,13 +358,38 @@ def process_video_depth(
             # still accepted (and recorded in the manifest below) for
             # compatibility with existing callers, but it no longer changes
             # what gets written -- there's only one output now.
-            depth_min = float(chunk_depths.min())
-            depth_max = float(chunk_depths.max())
+            #
+            # Two adjustments on top of a plain min/max, both aimed at the
+            # same failure mode: a single chunk's true min/max is set by
+            # whatever pixel in whatever frame happened to be closest/
+            # farthest from the camera in that ~150-frame window (e.g. a
+            # hand passing close to the lens for a moment). Using that as
+            # the normalization range for the *entire* chunk drags every
+            # other frame's brightness along with it, producing a visible
+            # darken/brighten pulse for the chunk's whole ~6s duration.
+            #
+            # 1. Percentile-based range instead of true min/max: a handful
+            #    of outlier pixels no longer set the range for the whole
+            #    chunk -- they just clip to pure black/white themselves
+            #    (via the np.clip in save_depth_png16), localized to the
+            #    frames/pixels that are actually extreme.
+            # 2. Blend with the running range from prior chunks: keeps the
+            #    range from snapping to a different value at each chunk
+            #    boundary, since consecutive chunks of the same scene
+            #    should usually have a similar depth range anyway.
+            depth_min = float(np.percentile(chunk_depths, 1))
+            depth_max = float(np.percentile(chunk_depths, 99))
+            if prev_depth_min is not None:
+                carry_forward = 0.7  # weight given to the running range vs. this chunk's own
+                depth_min = carry_forward * prev_depth_min + (1 - carry_forward) * depth_min
+                depth_max = carry_forward * prev_depth_max + (1 - carry_forward) * depth_max
+            prev_depth_min, prev_depth_max = depth_min, depth_max
             depth_range = max(depth_max - depth_min, 1e-6)
             chunk_depths = (chunk_depths - depth_min) / depth_range
             print(
                 f"[chunk {chunk_num}] Normalized depth range "
-                f"[{depth_min:.4f}, {depth_max:.4f}] -> [0, 1]"
+                f"[{depth_min:.4f}, {depth_max:.4f}] -> [0, 1] "
+                "(1st/99th percentile, blended with prior chunks)"
             )
             if not davinci_safe:
                 print(
