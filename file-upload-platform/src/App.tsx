@@ -8,7 +8,7 @@ type Overlay = "none" | "about" | "login" | "settings";
 
 const MAX_BYTES = 100 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 60;
-const OUTPUT_FORMAT_LABEL = "EXR Depth Sequence";
+const OUTPUT_FORMAT_LABEL = "16-BIT PNG Depth Sequence";
 const STEP_LABELS = ["Uploading", "Analyzing", "Preparing output"];
 
 function formatSize(bytes: number): string {
@@ -402,7 +402,7 @@ function IdleView({
         <div>
           <div style={{ fontSize: 14, fontWeight: 500 }}>Drag a file here or click to browse</div>
           <div style={{ fontSize: 10, color: "#999999", marginTop: 4 }}>
-            Outputs as {OUTPUT_FORMAT_LABEL} — up to 1 minute, 100MB
+            Outputs as {OUTPUT_FORMAT_LABEL} — up to 1 minute, 6GB
           </div>
           {error && <div style={styles.inlineError}>{error}</div>}
         </div>
