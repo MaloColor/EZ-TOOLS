@@ -33,16 +33,24 @@ export async function getJobStatus(
 /**
  * Polls RunPod until the job leaves IN_QUEUE/IN_PROGRESS. Calls `onTick` on
  * every poll so the caller can drive step UI off the raw status.
+ *
+ * `output` is passed through as-is while the job is still running: the
+ * worker can push intermediate values via RunPod's progress_update() API
+ * (see handler.py's on_progress), which land in this exact field with
+ * status still IN_PROGRESS -- so a worker that reports progress lets the
+ * caller show real frame-based percentage; an older worker that doesn't
+ * just means output stays null until the job actually completes, which
+ * callers need to handle gracefully.
  */
 export async function pollJobUntilDone(
   id: string,
-  onTick: (status: JobStatus) => void,
+  onTick: (status: JobStatus, output: unknown) => void,
   { intervalMs = 3000, timeoutMs = 15 * 60 * 1000 } = {}
 ): Promise<unknown> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const { status, output } = await getJobStatus(id);
-    onTick(status);
+    onTick(status, output);
     if (status === "COMPLETED") return output;
     if (status === "FAILED" || status === "CANCELLED" || status === "TIMED_OUT") {
       throw new Error(`RunPod job ended with status ${status}`);

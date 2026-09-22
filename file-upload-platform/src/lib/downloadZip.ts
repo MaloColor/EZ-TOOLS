@@ -136,14 +136,24 @@ export async function getVerifiedOutputFrameCount(
   return manifest.frame_count;
 }
 
+// Downloading frames dominates wall-clock time (network-bound, hundreds to
+// thousands of requests); packaging is fast since generateAsync uses STORE
+// (no compression). Weighting the two phases like this means the bar moves
+// smoothly through the slow part instead of sitting at 0% then jumping to
+// 100% once the last frame lands.
+const DOWNLOAD_PROGRESS_WEIGHT = 0.9;
+const ZIP_PROGRESS_WEIGHT = 1 - DOWNLOAD_PROGRESS_WEIGHT;
+
 /**
  * Reads the completed job manifest, verifies every listed output frame exists
  * in storage, then zips exactly those PNGs (nothing else from the bucket).
+ * onProgress, if given, is called with a fraction from 0 to 1.
  */
 export async function downloadOutputAsZip(
   outputBucket: string,
   outputPrefix: string,
-  zipName: string
+  zipName: string,
+  onProgress?: (fraction: number) => void
 ): Promise<void> {
   const manifest = await readOutputManifest(outputBucket, outputPrefix);
   const frames = await listOutputFrameFiles(outputBucket, outputPrefix);
@@ -151,6 +161,7 @@ export async function downloadOutputAsZip(
 
   const zip = new JSZip();
   let nextIndex = 0;
+  let downloadedCount = 0;
 
   async function downloadWorker() {
     while (nextIndex < frames.length) {
@@ -164,6 +175,8 @@ export async function downloadOutputAsZip(
         );
       }
       zip.file(file.name, blob);
+      downloadedCount++;
+      onProgress?.((downloadedCount / frames.length) * DOWNLOAD_PROGRESS_WEIGHT);
     }
   }
 
@@ -175,7 +188,11 @@ export async function downloadOutputAsZip(
     throw new Error("Zip did not include every output frame — download aborted.");
   }
 
-  const zipBlob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+  const zipBlob = await zip.generateAsync({ type: "blob", compression: "STORE" }, (metadata) => {
+    onProgress?.(DOWNLOAD_PROGRESS_WEIGHT + (metadata.percent / 100) * ZIP_PROGRESS_WEIGHT);
+  });
+  onProgress?.(1);
+
   const url = URL.createObjectURL(zipBlob);
   const a = document.createElement("a");
   a.href = url;

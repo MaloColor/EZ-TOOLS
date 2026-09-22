@@ -223,8 +223,13 @@ def process_video_depth(
     video_key: str,
     output_bucket: str,
     output_prefix: str = "depth_sequence",
-    davinci_safe: bool = True
+    davinci_safe: bool = True,
+    on_progress=None,
 ):
+    """on_progress, if given, is called as on_progress(frame_index, total_frames)
+    after total_frames is known and again after every chunk -- lets the caller
+    (see handler() below) push real render progress back to RunPod instead of
+    the frontend only ever knowing IN_QUEUE / IN_PROGRESS / COMPLETED."""
     supabase = get_supabase()
     model, device = load_model()
 
@@ -285,6 +290,10 @@ def process_video_depth(
         else:
             print("[FRAME COUNT] WARNING: total_frames could not be determined up front (cv2 fallback, unknown count).")
 
+        def report_progress():
+            if on_progress and total_frames:
+                on_progress(frame_index, total_frames)
+
         # output_prefix is content-derived (see get_uploaded_frame_indices),
         # so a retried job for the same video+setting lands here and can
         # pick up where a prior, possibly-killed attempt left off instead of
@@ -299,6 +308,7 @@ def process_video_depth(
 
         frame_index = 0
         chunk_num = 0
+        report_progress()  # initial 0/total_frames so the frontend has a real number immediately
 
         def flush_chunk(buffer):
             nonlocal frame_index, chunk_num
@@ -371,6 +381,7 @@ def process_video_depth(
                 frame_index += 1
 
             print(f"[chunk {chunk_num}] Uploaded {n} frame(s), {frame_index} total so far.")
+            report_progress()
 
         if DECORD_AVAILABLE:
             for start in range(0, total_frames, CHUNK_SIZE_FRAMES):
@@ -378,6 +389,7 @@ def process_video_depth(
                 if uploaded_frames and all(i in uploaded_frames for i in range(start, end)):
                     print(f"[chunk] frames {start}-{end - 1} already uploaded, skipping.")
                     frame_index = end
+                    report_progress()
                     continue
                 chunk = vr.get_batch(list(range(start, end))).asnumpy()
                 flush_chunk(chunk)
@@ -448,12 +460,31 @@ def handler(job):
         output_prefix = job_input.get("output_prefix", "sequence_001")
         davinci_safe = job_input.get("davinci_safe", True)
 
+        # Pushes an intermediate value via RunPod's progress_update() API,
+        # which shows up in the regular /status/{id} response's "output"
+        # field while the job is still IN_PROGRESS (replaced by the real
+        # return value once this function returns below). The frontend reads
+        # this to show actual frame-based progress instead of just
+        # IN_QUEUE/IN_PROGRESS/COMPLETED -- but progress reporting is
+        # inherently best-effort: if this API behaves differently than
+        # expected, or the call fails outright, that must never take down
+        # the actual video processing, so any error here is only logged.
+        def on_progress(frame_index, total_frames):
+            try:
+                runpod.serverless.progress_update(job, {
+                    "frame_index": frame_index,
+                    "total_frames": total_frames,
+                })
+            except Exception as e:
+                print(f"[PROGRESS] Could not send progress update ({frame_index}/{total_frames}): {e}")
+
         process_video_depth(
             input_bucket=input_bucket,
             video_key=video_key,
             output_bucket=output_bucket,
             output_prefix=output_prefix,
-            davinci_safe=davinci_safe
+            davinci_safe=davinci_safe,
+            on_progress=on_progress,
         )
 
         return {

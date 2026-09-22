@@ -69,6 +69,45 @@ async function outputInfoForJob(prefix: string, baseName: string): Promise<Outpu
   return { prefix, baseName, frameCount };
 }
 
+interface RenderProgress {
+  frameIndex: number;
+  totalFrames: number;
+}
+
+// The worker pushes {frame_index, total_frames} via RunPod's progress_update()
+// API while IN_PROGRESS (see handler.py's on_progress) -- that lands verbatim
+// in the job-status response's `output` field. An older, not-yet-redeployed
+// worker never sends this, so `output` stays null/unrecognized the whole
+// time; callers need to fall back gracefully rather than assume it's there.
+function parseRenderProgress(output: unknown): RenderProgress | null {
+  if (!output || typeof output !== "object") return null;
+  const o = output as Record<string, unknown>;
+  if (
+    typeof o.frame_index === "number" &&
+    typeof o.total_frames === "number" &&
+    o.total_frames > 0 &&
+    o.frame_index >= 0
+  ) {
+    return { frameIndex: o.frame_index, totalFrames: o.total_frames };
+  }
+  return null;
+}
+
+// Estimates seconds remaining from how many frames got done between the
+// first progress sample we saw and this one -- a live rate, not a static
+// guess, so it tightens up as the job actually runs.
+function estimateEtaSeconds(
+  progress: RenderProgress,
+  baseline: { time: number; frameIndex: number }
+): number | null {
+  const elapsedSec = (Date.now() - baseline.time) / 1000;
+  const framesDone = progress.frameIndex - baseline.frameIndex;
+  if (framesDone <= 0 || elapsedSec <= 0) return null;
+  const remaining = progress.totalFrames - progress.frameIndex;
+  if (remaining <= 0) return 0;
+  return (remaining / framesDone) * elapsedSec;
+}
+
 export default function App() {
   const [view, setView] = useState<View>("idle");
   const [overlay, setOverlay] = useState<Overlay>("none");
@@ -78,12 +117,16 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [outputInfo, setOutputInfo] = useState<OutputInfo | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [notify, setNotify] = useState(true);
   const [davinciSafe, setDavinciSafe] = useState(true);
   const [checking, setChecking] = useState(false);
   const [alreadyProcessed, setAlreadyProcessed] = useState(false);
+  const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
+  const [renderEtaSeconds, setRenderEtaSeconds] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
+  const renderBaselineRef = useRef<{ time: number; frameIndex: number } | null>(null);
 
   function reset() {
     setView("idle");
@@ -92,6 +135,9 @@ export default function App() {
     setError(null);
     setOutputInfo(null);
     setAlreadyProcessed(false);
+    setRenderProgress(null);
+    setRenderEtaSeconds(null);
+    renderBaselineRef.current = null;
   }
 
   async function pickFile(f: File | null | undefined) {
@@ -197,8 +243,18 @@ export default function App() {
         davinci_safe: davinciSafe,
       });
 
-      await pollJobUntilDone(jobId, (status: JobStatus) => {
-        if (status === "IN_PROGRESS") setStep(2);
+      await pollJobUntilDone(jobId, (status: JobStatus, output: unknown) => {
+        if (status !== "IN_PROGRESS") return;
+        setStep(2);
+        const progress = parseRenderProgress(output);
+        setRenderProgress(progress);
+        if (!progress) return;
+        if (!renderBaselineRef.current) {
+          renderBaselineRef.current = { time: Date.now(), frameIndex: progress.frameIndex };
+          setRenderEtaSeconds(null);
+        } else {
+          setRenderEtaSeconds(estimateEtaSeconds(progress, renderBaselineRef.current));
+        }
       });
 
       setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
@@ -214,8 +270,9 @@ export default function App() {
   async function handleDownload() {
     if (!outputInfo) return;
     setDownloading(true);
+    setDownloadProgress(0);
     try {
-      await downloadOutputAsZip(OUTPUT_BUCKET, outputInfo.prefix, `${outputInfo.baseName}_depth`);
+      await downloadOutputAsZip(OUTPUT_BUCKET, outputInfo.prefix, `${outputInfo.baseName}_depth`, setDownloadProgress);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Download failed.");
     } finally {
@@ -295,12 +352,15 @@ export default function App() {
               />
             )}
 
-            {view === "processing" && <ProcessingView step={step} />}
+            {view === "processing" && (
+              <ProcessingView step={step} renderProgress={renderProgress} renderEtaSeconds={renderEtaSeconds} />
+            )}
 
             {view === "done" && outputInfo && (
               <DoneView
                 outputInfo={outputInfo}
                 downloading={downloading}
+                downloadProgress={downloadProgress}
                 alreadyProcessed={alreadyProcessed}
                 onReset={reset}
                 onDownload={handleDownload}
@@ -489,10 +549,27 @@ function ConfiguringView({
   );
 }
 
-function ProcessingView({ step }: { step: number }) {
+function ProcessingView({
+  step,
+  renderProgress,
+  renderEtaSeconds,
+}: {
+  step: number;
+  renderProgress: RenderProgress | null;
+  renderEtaSeconds: number | null;
+}) {
+  const RENDER_STEP_INDEX = 2; // "Preparing output" -- the RunPod render itself
   const total = STEP_LABELS.length;
+  // Real per-frame progress from the worker replaces the flat "half credit for
+  // being active" guess once we have it -- the bar actually tracks the render
+  // instead of just sitting at a fixed spot for however long that step takes.
+  const renderFraction =
+    renderProgress && renderProgress.totalFrames > 0
+      ? renderProgress.frameIndex / renderProgress.totalFrames
+      : 0.5;
   const completedUnits = STEP_LABELS.reduce(
-    (acc, _label, i) => acc + (step > i ? 1 : step === i ? 0.5 : 0),
+    (acc, _label, i) =>
+      acc + (step > i ? 1 : step === i ? (i === RENDER_STEP_INDEX ? renderFraction : 0.5) : 0),
     0
   );
   const percent = Math.min(100, Math.round((completedUnits / total) * 100));
@@ -511,6 +588,7 @@ function ProcessingView({ step }: { step: number }) {
         const ringColor = done || active ? "#111111" : "#e0e0e0";
         const fillColor = done ? "#111111" : "#ffffff";
         const textColor = done || active ? "#111111" : "#aaaaaa";
+        const showRenderDetail = active && i === RENDER_STEP_INDEX && renderProgress;
         return (
           <div key={label} style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {active ? (
@@ -520,7 +598,18 @@ function ProcessingView({ step }: { step: number }) {
                 {done && <CheckIcon />}
               </span>
             )}
-            <span style={{ fontSize: 13, color: textColor }}>{label}</span>
+            <span style={{ fontSize: 13, color: textColor }}>
+              {label}
+              {showRenderDetail && (
+                <span style={{ color: "#999999", fontWeight: 400 }}>
+                  {" "}
+                  — {renderProgress!.frameIndex}/{renderProgress!.totalFrames} frames
+                  {renderEtaSeconds != null && renderEtaSeconds > 0 && (
+                    <> · ~{formatDuration(Math.ceil(renderEtaSeconds))} left</>
+                  )}
+                </span>
+              )}
+            </span>
           </div>
         );
       })}
@@ -531,16 +620,19 @@ function ProcessingView({ step }: { step: number }) {
 function DoneView({
   outputInfo,
   downloading,
+  downloadProgress,
   alreadyProcessed,
   onReset,
   onDownload,
 }: {
   outputInfo: OutputInfo;
   downloading: boolean;
+  downloadProgress: number;
   alreadyProcessed: boolean;
   onReset: () => void;
   onDownload: () => void;
 }) {
+  const downloadPercent = Math.round(downloadProgress * 100);
   return (
     <div style={{ ...styles.card, alignItems: "center", padding: "36px 24px" }}>
       <div style={styles.doneCheckCircle}>
@@ -560,12 +652,22 @@ function DoneView({
           {outputInfo.baseName}_depth.zip · {outputInfo.frameCount} frames (matches job output)
         </div>
       </div>
+      {downloading && (
+        <div style={{ width: "100%", maxWidth: 320 }}>
+          <div style={styles.progressTrack}>
+            <div style={{ ...styles.progressFill, width: `${downloadPercent}%` }} />
+          </div>
+          <div style={styles.progressLabel}>
+            {downloadPercent < 90 ? "Downloading frames…" : "Packaging zip…"} {downloadPercent}%
+          </div>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
         <button onClick={onReset} style={styles.secondaryButton}>
           Start over
         </button>
         <button onClick={onDownload} disabled={downloading} style={styles.primaryButtonSmall}>
-          {downloading ? "Zipping…" : "Download"}
+          {downloading ? `Zipping… ${downloadPercent}%` : "Download"}
         </button>
       </div>
     </div>
