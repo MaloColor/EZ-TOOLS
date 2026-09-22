@@ -601,9 +601,9 @@ function PanelHeader({ title }: { title: string }) {
 
 function AboutPanel() {
   const steps = [
-    { n: 1, title: "Lorem ipsum upload", body: "Consectetur adipiscing elit, sed do eiusmod tempor incididunt." },
-    { n: 2, title: "Dolore magna processing", body: "Ut enim ad minim veniam, quis nostrud exercitation ullamco." },
-    { n: 3, title: "Laboris nisi download", body: "Duis aute irure dolor in reprehenderit in voluptate velit." },
+    { n: 1, title: "Upload your video", body: "Up to 1min and 6 GB" },
+    { n: 2, title: "Download it & Import it", body: "Import the PNG sequence as a matte, drop it into the clip node graph, & link the matte's alpha channel to any node you want." },
+    { n: 3, title: "Control your depth map setting with NodeKey.", body: "Adjust the offset parameter in NodeKey (NodeKey output) to control how far or close the effect reaches into the image." },
   ];
   const tiers: Array<{ name: string; detail: string; price: string; period?: string; active: boolean }> = [
     { name: "Per Second", detail: "This service is calculated based on second of use", price: "$xx", active: false },
