@@ -48,6 +48,11 @@ if "/app" not in sys.path:
     sys.path.insert(0, "/app")
 
 from video_depth_anything.video_depth import VideoDepthAnything
+# Same helper Video-Depth-Anything uses internally (video_depth.py) to align
+# its own 32-frame inference windows onto a shared scale -- reused below to
+# align our own, much larger, outer CHUNK_SIZE_FRAMES windows onto each
+# other too (see CHUNK_OVERLAP_FRAMES).
+from utils.util import compute_scale_and_shift
 
 # --- Environment Setup ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
@@ -61,6 +66,22 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "Video-Depth-Anything-Base")
 # constant regardless of video length. Tunable via env var since the right
 # chunk size depends on video resolution and available RAM.
 CHUNK_SIZE_FRAMES = int(os.environ.get("CHUNK_SIZE_FRAMES", "150"))
+
+# infer_video_depth() aligns scale internally ACROSS the frames passed to a
+# single call (it windows internally at 32 frames with a 10-frame overlap,
+# solving a linear scale+shift fit between windows -- see upstream
+# video_depth_anything/video_depth.py) -- but that alignment never crosses
+# our own outer chunk boundary, since each CHUNK_SIZE_FRAMES chunk is an
+# entirely separate call with no knowledge of the previous chunk's scale.
+# That produced a real depth-scale jump (not just a normalization artifact)
+# at every chunk boundary. Fixed the same way upstream fixes it internally:
+# re-run inference on the last CHUNK_OVERLAP_FRAMES frames of the previous
+# chunk at the start of the next one, then solve for the scale+shift that
+# best maps the new chunk's depth for those frames onto the previous
+# chunk's already-output depth for the same frames, and apply that
+# transform to the whole new chunk before normalizing. The overlap frames
+# themselves are only used for this fit and dropped from the output.
+CHUNK_OVERLAP_FRAMES = int(os.environ.get("CHUNK_OVERLAP_FRAMES", "8"))
 
 # Global variables for model/client caching
 MODEL = None
@@ -250,13 +271,13 @@ def process_video_depth(
         # output in memory at once. This keeps peak memory roughly constant
         # regardless of video length.
         #
-        # Tradeoff: infer_video_depth() does its own internal scale-and-shift
-        # alignment ACROSS the frames passed to a single call, so processing
-        # independent chunks means there can be a small depth-scale
-        # discontinuity at each chunk boundary that wouldn't exist if the
-        # whole clip were processed in one call. In practice that's a minor
-        # seam every CHUNK_SIZE_FRAMES frames -- a much better tradeoff than
-        # the job crashing outright on anything longer than a short clip.
+        # infer_video_depth() does its own internal scale-and-shift alignment
+        # ACROSS the frames passed to a single call, so naively processing
+        # independent chunks would otherwise mean a real depth-scale
+        # discontinuity at each chunk boundary (not just a display/
+        # normalization artifact) -- see CHUNK_OVERLAP_FRAMES and flush_chunk
+        # below for how each chunk gets aligned onto the previous one's scale
+        # before it's normalized and written out.
         if DECORD_AVAILABLE:
             vr = VideoReader(local_video_path, ctx=decord_cpu(0))
             total_frames = len(vr)
@@ -314,10 +335,18 @@ def process_video_depth(
         # at the seam. None until the first chunk has been processed.
         prev_depth_min = None
         prev_depth_max = None
+        # Raw (unnormalized) depth for the last CHUNK_OVERLAP_FRAMES frames
+        # of the previous chunk's output -- the alignment reference the next
+        # chunk's overlap frames get fit against. None until the first chunk
+        # has been processed, or after a resumed run skips a chunk outright
+        # (see the DECORD_AVAILABLE loop below), in which case the next
+        # processed chunk just starts its own fresh scale, same as before
+        # this fix, instead of aligning to a chunk we never actually ran.
+        prev_tail_depth = None
         report_progress()  # initial 0/total_frames so the frontend has a real number immediately
 
-        def flush_chunk(buffer):
-            nonlocal frame_index, chunk_num, prev_depth_min, prev_depth_max
+        def flush_chunk(buffer, overlap=0):
+            nonlocal frame_index, chunk_num, prev_depth_min, prev_depth_max, prev_tail_depth
             if len(buffer) == 0:
                 return
             chunk_num += 1
@@ -326,12 +355,17 @@ def process_video_depth(
             # decord's get_batch().asnumpy() -- decord already returns RGB
             # (see utils/dc_utils.py: the decord branch does no color
             # conversion, only the cv2 fallback branch does), so no
-            # cv2.cvtColor is needed here either way.
+            # cv2.cvtColor is needed here either way. The leading `overlap`
+            # frames (if any) duplicate the tail of the previous chunk --
+            # included here only so inference re-runs on them for alignment,
+            # dropped from the output below.
             chunk_frames = np.stack(buffer, axis=0) if isinstance(buffer, list) else buffer
-            n = len(chunk_frames)
+            n_total = len(chunk_frames)
+            n_new = n_total - overlap
             print(
                 f"[chunk {chunk_num}] Running depth inference on frames "
-                f"{frame_index}-{frame_index + n - 1} ({n} frames)..."
+                f"{frame_index - overlap}-{frame_index + n_new - 1} "
+                f"({n_total} frames, {overlap} re-run for cross-chunk alignment)..."
             )
 
             with torch.no_grad():
@@ -350,6 +384,44 @@ def process_video_depth(
             del chunk_frames
             if device == "cuda":
                 torch.cuda.empty_cache()
+
+            # Align this chunk's depth scale onto the previous chunk's,
+            # using the overlap frames both chunks were run on -- fixes the
+            # actual depth-scale discontinuity at the chunk boundary (see
+            # CHUNK_OVERLAP_FRAMES above), as opposed to the normalization
+            # smoothing below, which only papers over a display-range jump
+            # and can't fix the underlying values being on a different
+            # scale to begin with.
+            if overlap > 0 and prev_tail_depth is not None:
+                scale, shift = compute_scale_and_shift(
+                    chunk_depths[:overlap].astype(np.float32),
+                    prev_tail_depth.astype(np.float32),
+                    np.ones_like(prev_tail_depth, dtype=np.float32),
+                )
+                chunk_depths = chunk_depths * scale + shift
+                chunk_depths[chunk_depths < 0] = 0
+                print(
+                    f"[chunk {chunk_num}] Aligned to previous chunk's depth scale "
+                    f"(scale={scale:.4f}, shift={shift:.4f}) using {overlap} "
+                    "overlapping frame(s)."
+                )
+            elif overlap > 0:
+                print(
+                    f"[chunk {chunk_num}] {overlap} overlapping frame(s) present but no "
+                    "prior reference available (first chunk after a resumed skip) -- "
+                    "skipping cross-chunk alignment."
+                )
+
+            # Drop the overlap frames now that they've served their purpose
+            # -- they duplicate frames already accounted for by the
+            # previous chunk (or, on a resume, already uploaded).
+            chunk_depths = chunk_depths[overlap:]
+
+            # Save this chunk's own tail as the alignment reference for the
+            # *next* chunk, in the same (now-aligned) scale as what's about
+            # to be written out below.
+            tail_len = min(CHUNK_OVERLAP_FRAMES, len(chunk_depths))
+            prev_tail_depth = chunk_depths[-tail_len:].copy() if tail_len > 0 else None
 
             # PNG can only hold a bounded, fixed-precision range -- unlike
             # the EXR output this replaced, there's no way to write
@@ -411,7 +483,7 @@ def process_video_depth(
                 os.remove(local_frame_path)
                 frame_index += 1
 
-            print(f"[chunk {chunk_num}] Uploaded {n} frame(s), {frame_index} total so far.")
+            print(f"[chunk {chunk_num}] Uploaded {n_new} frame(s), {frame_index} total so far.")
             report_progress()
 
         if DECORD_AVAILABLE:
@@ -420,17 +492,32 @@ def process_video_depth(
                 if uploaded_frames and all(i in uploaded_frames for i in range(start, end)):
                     print(f"[chunk] frames {start}-{end - 1} already uploaded, skipping.")
                     frame_index = end
+                    # A skipped chunk means the next processed chunk has no
+                    # prior in-memory depth to align against -- see the
+                    # prev_tail_depth comment above.
+                    prev_tail_depth = None
                     report_progress()
                     continue
-                chunk = vr.get_batch(list(range(start, end))).asnumpy()
-                flush_chunk(chunk)
+                # Re-read the previous chunk's last CHUNK_OVERLAP_FRAMES
+                # frames too (decord can seek, so this is just re-decoding,
+                # not re-inferring anything we didn't already infer) so
+                # flush_chunk can align this chunk onto the previous one's
+                # depth scale. None for the very first chunk.
+                overlap = min(CHUNK_OVERLAP_FRAMES, start)
+                chunk = vr.get_batch(list(range(start - overlap, end))).asnumpy()
+                flush_chunk(chunk, overlap=overlap)
         else:
             # cv2 has no reliable random-access seek here (see the DECORD_AVAILABLE
             # comment at the top of this file), so unlike the decord path this
             # can't skip decoding already-uploaded frames -- it re-decodes
             # everything, but upload_with_retry's upsert makes re-uploading
             # already-present frames a harmless no-op rather than a failure.
+            # Since there's no seeking, the last CHUNK_OVERLAP_FRAMES raw
+            # frames of each chunk are kept around (cheap -- just a handful
+            # of images) and prepended to the next chunk's buffer instead,
+            # for the same alignment purpose as the decord path's re-seek.
             buffer = []
+            overlap_carry = []
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
@@ -438,10 +525,15 @@ def process_video_depth(
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 buffer.append(frame)
                 if len(buffer) >= CHUNK_SIZE_FRAMES:
-                    flush_chunk(buffer)
+                    overlap = len(overlap_carry)
+                    full_buffer = overlap_carry + buffer
+                    flush_chunk(full_buffer, overlap=overlap)
+                    overlap_carry = full_buffer[-CHUNK_OVERLAP_FRAMES:]
                     buffer = []
             cap.release()
-            flush_chunk(buffer)
+            if buffer:
+                overlap = len(overlap_carry)
+                flush_chunk(overlap_carry + buffer, overlap=overlap)
 
         if frame_index == 0:
             raise ValueError("No frames could be extracted from the provided video file.")
