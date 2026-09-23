@@ -720,13 +720,6 @@ function AboutPanel() {
     <div style={styles.panelRoot}>
       <PanelHeader title="About" />
       <div style={styles.panelBody}>
-        {videos.map((v) => (
-          <div key={v.src}>
-            <div style={styles.eyebrow}>{v.title}</div>
-            <video src={v.src} controls playsInline preload="metadata" style={styles.aboutVideo} />
-          </div>
-        ))}
-
         <div>
           <div style={styles.eyebrow}>How it works</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -771,6 +764,15 @@ function AboutPanel() {
           Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et
           dolore magna aliqua.
         </p>
+
+        <div style={styles.aboutVideoGrid}>
+          {videos.map((v) => (
+            <div key={v.src}>
+              <div style={styles.eyebrow}>{v.title}</div>
+              <video src={v.src} controls playsInline preload="metadata" style={styles.aboutVideo} />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1209,6 +1211,12 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: "column",
     gap: 24,
     overflowY: "auto",
+  },
+  aboutVideoGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+    gap: 16,
+    maxWidth: 720,
   },
   aboutVideo: {
     display: "block",
