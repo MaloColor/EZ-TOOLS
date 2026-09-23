@@ -707,6 +707,10 @@ function AboutPanel() {
     { n: 2, title: "Download it & Import it", body: "Import the PNG sequence as a matte, drop it into the clip node graph, & link the matte's alpha channel to any node you want." },
     { n: 3, title: "Control your depth map setting with NodeKey.", body: "Adjust the offset parameter in NodeKey (NodeKey output) to control how far or close the effect reaches into the image." },
   ];
+  const videos = [
+    { title: "Demo", src: "/videos/ez-depth-demo.mp4" },
+    { title: "Tutorial", src: "/videos/ez-depth-tutorial.mp4" },
+  ];
   const tiers: Array<{ name: string; detail: string; price: string; period?: string; active: boolean }> = [
     { name: "Per Second", detail: "This service is calculated based on second of use", price: "$xx", active: false },
     { name: "Other Option", detail: "Consectetur adipiscing elit", price: "$xx", active: true },
@@ -716,6 +720,13 @@ function AboutPanel() {
     <div style={styles.panelRoot}>
       <PanelHeader title="About" />
       <div style={styles.panelBody}>
+        {videos.map((v) => (
+          <div key={v.src}>
+            <div style={styles.eyebrow}>{v.title}</div>
+            <video src={v.src} controls playsInline preload="metadata" style={styles.aboutVideo} />
+          </div>
+        ))}
+
         <div>
           <div style={styles.eyebrow}>How it works</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -1198,6 +1209,12 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: "column",
     gap: 24,
     overflowY: "auto",
+  },
+  aboutVideo: {
+    display: "block",
+    width: "100%",
+    borderRadius: 8,
+    background: "#000000",
   },
   numberBadge: {
     width: 22,
