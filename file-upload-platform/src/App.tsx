@@ -708,8 +708,8 @@ function AboutPanel() {
     { n: 3, title: "Control your depth map setting with NodeKey.", body: "Adjust the offset parameter in NodeKey (NodeKey output) to control how far or close the effect reaches into the image." },
   ];
   const tiers: Array<{ name: string; detail: string; price: string; period?: string; active: boolean }> = [
-    { name: "Per Second", detail: "This service is calculated based on second of use", price: "$xx", active: false },
-    { name: "Other Option", detail: "Consectetur adipiscing elit", price: "$xx", active: true },
+    { name: "Per Second", detail: "This service is calculated based on seconds of use", price: "$xx", active: false },
+    { name: "Other Option", detail: "Work in Progress", price: "$xx", active: true },
   ];
 
   return (
@@ -818,7 +818,7 @@ function SettingsPanel({
           <div style={styles.tierRow}>
             <div>
               <div style={{ fontSize: 13 }}>Email when processing finishes</div>
-              <div style={{ fontSize: 10, color: "#999999", marginTop: 2 }}>Lorem ipsum dolor sit amet.</div>
+              <div style={{ fontSize: 10, color: "#999999", marginTop: 2 }}>Work in progress.</div>
             </div>
             <button onClick={onToggleNotify} style={{ ...styles.toggle, background: notify ? "#111111" : "#e0e0e0" }}>
               <span style={{ ...styles.toggleKnob, left: notify ? 18 : 2 }} />
