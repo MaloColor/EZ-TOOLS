@@ -5,6 +5,7 @@ import json
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import torch
 import numpy as np
@@ -83,6 +84,12 @@ CHUNK_SIZE_FRAMES = int(os.environ.get("CHUNK_SIZE_FRAMES", "150"))
 # themselves are only used for this fit and dropped from the output.
 CHUNK_OVERLAP_FRAMES = int(os.environ.get("CHUNK_OVERLAP_FRAMES", "8"))
 
+# How many frame uploads to run at once. Uploads are network-bound (one HTTP
+# request per frame to Supabase Storage), so doing them one at a time leaves
+# the GPU idle waiting on hundreds of sequential round trips per chunk --
+# same fix as DOWNLOAD_CONCURRENCY on the frontend's zip download.
+UPLOAD_CONCURRENCY = int(os.environ.get("UPLOAD_CONCURRENCY", "8"))
+
 # Global variables for model/client caching
 MODEL = None
 DEVICE = None
@@ -155,28 +162,36 @@ def load_model() -> tuple[VideoDepthAnything, str]:
     return MODEL, DEVICE
 
 
-def save_depth_png16(depth_map: np.ndarray, output_path: str):
-    """Saves a 2D depth array as a 16-bit grayscale PNG.
+def encode_depth_png16(depth_map: np.ndarray) -> bytes:
+    """Encodes a 2D depth array as a 16-bit grayscale PNG, in memory.
 
     Expects values already normalized to [0, 1] (see process_video_depth) --
     PNG has no way to store unbounded float like the EXR output this
     replaced, only a fixed, bounded integer range. 16-bit (65,536 levels)
     keeps gradients smooth (no visible banding) while still being far
     smaller and more broadly compatible than 32-bit float EXR.
+
+    Returns the compressed PNG bytes directly instead of writing to disk --
+    the only reason a prior version wrote to a temp file was to hand bytes
+    to upload_with_retry, which read the file right back. That write/read/
+    delete round trip per frame was pure overhead.
     """
     depth_uint16 = np.clip(depth_map, 0.0, 1.0)
     depth_uint16 = (depth_uint16 * 65535.0 + 0.5).astype(np.uint16)
-    cv2.imwrite(output_path, depth_uint16)
+    ok, encoded = cv2.imencode(".png", depth_uint16)
+    if not ok:
+        raise RuntimeError("cv2.imencode failed to encode depth frame as PNG")
+    return encoded.tobytes()
 
 
 def upload_with_retry(
     supabase: Client,
     bucket: str,
     remote_path: str,
-    local_path: str,
+    data: bytes,
     max_attempts: int = 4,
 ):
-    """Uploads a file to Supabase Storage, retrying on transient network
+    """Uploads bytes to Supabase Storage, retrying on transient network
     errors (timeouts, connection resets) with exponential backoff.
 
     A sequence upload is hundreds to thousands of individual HTTP requests
@@ -186,12 +201,11 @@ def upload_with_retry(
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            with open(local_path, "rb") as upload_file:
-                supabase.storage.from_(bucket).upload(
-                    file=upload_file,
-                    path=remote_path,
-                    file_options={"cache-control": "3600", "upsert": "true"}
-                )
+            supabase.storage.from_(bucket).upload(
+                file=data,
+                path=remote_path,
+                file_options={"cache-control": "3600", "upsert": "true"}
+            )
             return
         except Exception as e:
             last_error = e
@@ -256,8 +270,6 @@ def process_video_depth(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_video_path = os.path.join(tmp_dir, "input.mp4")
-        frame_output_dir = os.path.join(tmp_dir, "depth_frames")
-        os.makedirs(frame_output_dir, exist_ok=True)
 
         # 1. Download Video
         print(f"[1/4] Downloading '{video_key}' from bucket '{input_bucket}'...")
@@ -443,7 +455,7 @@ def process_video_depth(
             # 1. Percentile-based range instead of true min/max: a handful
             #    of outlier pixels no longer set the range for the whole
             #    chunk -- they just clip to pure black/white themselves
-            #    (via the np.clip in save_depth_png16), localized to the
+            #    (via the np.clip in encode_depth_png16), localized to the
             #    frames/pixels that are actually extreme.
             # 2. Blend with the running range from prior chunks: keeps the
             #    range from snapping to a different value at each chunk
@@ -469,20 +481,31 @@ def process_video_depth(
                     "but PNG output requires a bounded range -- normalizing anyway."
                 )
 
-            for depth_frame in chunk_depths:
-                frame_filename = f"frame_{frame_index:04d}.png"
-                local_frame_path = os.path.join(frame_output_dir, frame_filename)
-                remote_upload_path = f"{output_prefix}/{frame_filename}"
+            # Encode + upload every frame in this chunk in parallel instead
+            # of one at a time -- each frame is an independent PNG encode
+            # (CPU) plus an independent HTTP request (network-bound), so
+            # serializing them just leaves the GPU idle waiting on hundreds
+            # of sequential round trips per chunk. Frame index is computed
+            # up front per frame, so completion order doesn't matter.
+            chunk_start_index = frame_index
 
-                save_depth_png16(depth_frame, local_frame_path)
-                upload_with_retry(supabase, output_bucket, remote_upload_path, local_frame_path)
-                # Delete each temp frame right after upload rather than
-                # letting them pile up in tmp_dir for the whole job -- disk
-                # on these workers is small (a few GB free) and long videos
-                # can mean thousands of frames.
-                os.remove(local_frame_path)
-                frame_index += 1
+            def encode_and_upload(offset: int):
+                idx = chunk_start_index + offset
+                frame_filename = f"frame_{idx:04d}.png"
+                png_bytes = encode_depth_png16(chunk_depths[offset])
+                upload_with_retry(
+                    supabase, output_bucket, f"{output_prefix}/{frame_filename}", png_bytes
+                )
 
+            with ThreadPoolExecutor(max_workers=min(UPLOAD_CONCURRENCY, n_new)) as executor:
+                # Calling .result() on each future (rather than just
+                # gathering them) re-raises the first exception hit -- a
+                # frame that exhausts upload_with_retry's attempts still
+                # fails the whole job instead of silently vanishing.
+                for future in [executor.submit(encode_and_upload, i) for i in range(n_new)]:
+                    future.result()
+
+            frame_index += n_new
             print(f"[chunk {chunk_num}] Uploaded {n_new} frame(s), {frame_index} total so far.")
             report_progress()
 
