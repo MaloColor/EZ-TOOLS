@@ -755,11 +755,6 @@ function AboutPanel() {
             ))}
           </div>
         </div>
-
-        <p style={{ fontSize: 10, color: "#999999", lineHeight: 1.6, margin: 0 }}>
-          Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et
-          dolore magna aliqua.
-        </p>
       </div>
     </div>
   );
