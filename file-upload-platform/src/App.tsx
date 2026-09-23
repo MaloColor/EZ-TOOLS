@@ -768,7 +768,7 @@ function LoginPanel() {
           <span style={styles.eyebrow}>Sign in</span>
           <h2 style={{ fontSize: 22, fontWeight: 600, margin: "8px 0 0 0" }}>Welcome back</h2>
           <p style={{ fontSize: 13, color: "#666666", margin: "8px 0 0 0", lineHeight: 1.5 }}>
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+            Work In Progress
           </p>
         </div>
         <button style={styles.oauthButton}>
