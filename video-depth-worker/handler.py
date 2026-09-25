@@ -4,6 +4,7 @@ import glob
 import json
 import re
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 import cv2
@@ -110,6 +111,30 @@ def get_supabase() -> Client:
             )
         SUPABASE = create_client(supabase_url, supabase_key)
     return SUPABASE
+
+
+_upload_client_local = threading.local()
+
+
+def get_supabase_for_upload() -> Client:
+    """Per-thread Supabase client, used only by the concurrent frame-upload
+    pool in flush_chunk.
+
+    The cached client from get_supabase() holds one underlying HTTP/2
+    connection. Sharing that single client (and connection) across
+    UPLOAD_CONCURRENCY threads meant every concurrent upload was
+    multiplexed onto the same connection -- when the server or an
+    intermediary edge dropped it under a burst, every request in flight on
+    it failed at once ("Server disconnected"), seen in production as
+    whole bursts of frames erroring together, then all succeeding a
+    couple seconds later on retry. Giving each worker thread its own
+    client (own connection) avoids that shared point of failure.
+    """
+    if not hasattr(_upload_client_local, "supabase"):
+        supabase_url = os.environ.get("SUPABASE_URL")
+        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        _upload_client_local.supabase = create_client(supabase_url, supabase_key)
+    return _upload_client_local.supabase
 
 
 def load_model() -> tuple[VideoDepthAnything, str]:
@@ -494,7 +519,7 @@ def process_video_depth(
                 frame_filename = f"frame_{idx:04d}.png"
                 png_bytes = encode_depth_png16(chunk_depths[offset])
                 upload_with_retry(
-                    supabase, output_bucket, f"{output_prefix}/{frame_filename}", png_bytes
+                    get_supabase_for_upload(), output_bucket, f"{output_prefix}/{frame_filename}", png_bytes
                 )
 
             with ThreadPoolExecutor(max_workers=min(UPLOAD_CONCURRENCY, n_new)) as executor:
