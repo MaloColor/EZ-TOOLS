@@ -148,13 +148,17 @@ const ZIP_PROGRESS_WEIGHT = 1 - DOWNLOAD_PROGRESS_WEIGHT;
  * Reads the completed job manifest, verifies every listed output frame exists
  * in storage, then zips exactly those PNGs (nothing else from the bucket).
  * onProgress, if given, is called with a fraction from 0 to 1.
+ *
+ * Returns an object URL for the finished zip. The caller owns it and must
+ * URL.revokeObjectURL() it when done -- it's kept alive so the UI can offer
+ * a manual "Save zip" link (see triggerSave below for why).
  */
 export async function downloadOutputAsZip(
   outputBucket: string,
   outputPrefix: string,
   zipName: string,
   onProgress?: (fraction: number) => void
-): Promise<void> {
+): Promise<string> {
   const manifest = await readOutputManifest(outputBucket, outputPrefix);
   const frames = await listOutputFrameFiles(outputBucket, outputPrefix);
   assertOutputMatchesManifest(frames, manifest.frame_count);
@@ -204,17 +208,23 @@ export async function downloadOutputAsZip(
   onProgress?.(1);
 
   const url = URL.createObjectURL(zipBlob);
+  triggerSave(url, `${zipName}.zip`);
+  return url;
+}
+
+/**
+ * Programmatically clicks a download link. This runs long after the user's
+ * actual click (after every frame is fetched and zipped), by which point
+ * the browser no longer treats it as user-initiated -- Safari and some
+ * Chrome download settings silently drop such saves with no error. So it's
+ * best-effort only; the UI also renders a real link to the same URL that
+ * the user can click themselves.
+ */
+export function triggerSave(url: string, fileName: string) {
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${zipName}.zip`;
+  a.download = fileName;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  // Revoking immediately after click() races the browser's download
-  // handler -- for a large blob (hundreds of MB to a few GB on a
-  // thousand-plus-frame job) the browser hasn't necessarily started
-  // reading it yet, so the URL can go invalid before the save actually
-  // begins and the download silently never happens. Give it a few
-  // seconds' head start before freeing the blob URL.
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }

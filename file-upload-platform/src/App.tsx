@@ -128,6 +128,16 @@ export default function App() {
   const dragCounter = useRef(0);
   const renderBaselineRef = useRef<{ time: number; frameIndex: number } | null>(null);
   const downloadingRef = useRef(false);
+  // Object URL of the last finished zip, kept so DoneView can offer a real
+  // "Save zip" link if the browser dropped the automatic save.
+  const [zipUrl, setZipUrl] = useState<string | null>(null);
+
+  function clearZipUrl() {
+    setZipUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+  }
 
   function reset() {
     setView("idle");
@@ -139,6 +149,7 @@ export default function App() {
     setRenderProgress(null);
     setRenderEtaSeconds(null);
     renderBaselineRef.current = null;
+    clearZipUrl();
   }
 
   async function pickFile(f: File | null | undefined) {
@@ -167,6 +178,7 @@ export default function App() {
 
   async function startProcessing() {
     if (!file) return;
+    clearZipUrl();
 
     if (!isSupabaseConfigured) {
       setError(
@@ -281,8 +293,11 @@ export default function App() {
     setDownloading(true);
     setDownloadProgress(0);
     setError(null);
+    clearZipUrl();
     try {
-      await downloadOutputAsZip(OUTPUT_BUCKET, outputInfo.prefix, `${outputInfo.baseName}_depth`, setDownloadProgress);
+      setZipUrl(
+        await downloadOutputAsZip(OUTPUT_BUCKET, outputInfo.prefix, `${outputInfo.baseName}_depth`, setDownloadProgress)
+      );
     } catch (e) {
       console.error("[download-zip] failed:", e);
       setError(e instanceof Error ? e.message : "Download failed.");
@@ -374,6 +389,7 @@ export default function App() {
                 downloading={downloading}
                 downloadProgress={downloadProgress}
                 error={error}
+                zipUrl={zipUrl}
                 alreadyProcessed={alreadyProcessed}
                 onReset={reset}
                 onDownload={handleDownload}
@@ -635,6 +651,7 @@ function DoneView({
   downloading,
   downloadProgress,
   error,
+  zipUrl,
   alreadyProcessed,
   onReset,
   onDownload,
@@ -643,6 +660,7 @@ function DoneView({
   downloading: boolean;
   downloadProgress: number;
   error: string | null;
+  zipUrl: string | null;
   alreadyProcessed: boolean;
   onReset: () => void;
   onDownload: () => void;
@@ -684,9 +702,19 @@ function DoneView({
         <button onClick={onReset} style={styles.secondaryButton}>
           Start over
         </button>
-        <button onClick={onDownload} disabled={downloading} style={styles.primaryButtonSmall}>
-          {downloading ? `Zipping… ${downloadPercent}%` : "Download"}
-        </button>
+        {zipUrl && !downloading ? (
+          <a
+            href={zipUrl}
+            download={`${outputInfo.baseName}_depth.zip`}
+            style={{ ...styles.primaryButtonSmall, display: "inline-flex", alignItems: "center", textDecoration: "none" }}
+          >
+            Save zip
+          </a>
+        ) : (
+          <button onClick={onDownload} disabled={downloading} style={styles.primaryButtonSmall}>
+            {downloading ? `Zipping… ${downloadPercent}%` : "Download"}
+          </button>
+        )}
       </div>
     </div>
   );
