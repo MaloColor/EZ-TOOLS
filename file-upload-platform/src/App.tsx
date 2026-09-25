@@ -6,7 +6,7 @@ import { downloadOutputAsZip, getVerifiedOutputFrameCount } from "./lib/download
 type View = "idle" | "configuring" | "processing" | "done" | "error";
 type Overlay = "none" | "about" | "login" | "settings";
 
-const MAX_BYTES = 100 * 1024 * 1024;
+const MAX_BYTES = 6 * 1024 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 60;
 const OUTPUT_FORMAT_LABEL = "16-BIT PNG Depth Sequence";
 const STEP_LABELS = ["Uploading", "Analyzing", "Preparing output"];
@@ -14,7 +14,9 @@ const STEP_LABELS = ["Uploading", "Analyzing", "Preparing output"];
 function formatSize(bytes: number): string {
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(0)} KB`;
-  return `${(kb / 1024).toFixed(1)} MB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
 }
 
 function formatDuration(seconds: number): string {
@@ -128,6 +130,7 @@ export default function App() {
   const dragCounter = useRef(0);
   const renderBaselineRef = useRef<{ time: number; frameIndex: number } | null>(null);
   const downloadingRef = useRef(false);
+  const startingRef = useRef(false);
 
   function reset() {
     setView("idle");
@@ -144,7 +147,7 @@ export default function App() {
   async function pickFile(f: File | null | undefined) {
     if (!f) return;
     if (f.size > MAX_BYTES) {
-      setError(`"${f.name}" is ${formatSize(f.size)} — max is 100MB.`);
+      setError(`"${f.name}" is ${formatSize(f.size)} — max is ${formatSize(MAX_BYTES)}.`);
       return;
     }
 
@@ -167,104 +170,116 @@ export default function App() {
 
   async function startProcessing() {
     if (!file) return;
-
-    if (!isSupabaseConfigured) {
-      setError(
-        "Supabase isn't configured yet — add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in the Vercel project settings, then redeploy."
-      );
-      setView("error");
-      return;
-    }
-
-    setError(null);
-    setChecking(true);
-
-    // Deterministic on file content + the DaVinci setting (which changes the
-    // output itself, via normalization) rather than a random UUID, so the
-    // same video processed the same way always lands at the same output
-    // location -- that's what lets us detect "already processed" below
-    // instead of silently re-running the job every time.
-    const baseName = file.name.replace(/\.[^.]+$/, "");
-    let contentHash: string;
-    try {
-      contentHash = await sha256Hex(file);
-    } catch (e) {
-      setChecking(false);
-      setError(e instanceof Error ? e.message : "Couldn't read the file.");
-      setView("error");
-      return;
-    }
-    const videoKey = `input/${contentHash}/${sanitizeFileName(file.name)}`;
-    const outputPrefix = `sequence_${contentHash}_${davinciSafe ? "dvsafe" : "raw"}`;
+    // Same race as handleDownload's downloadingRef: the "Process file"
+    // button's disabled={checking} only takes effect once React
+    // re-renders, so a fast double click could otherwise start two
+    // RunPod jobs (and two input uploads) for the same file in parallel.
+    // The try/finally below covers every exit path, including the
+    // isSupabaseConfigured and sha256Hex early returns.
+    if (startingRef.current) return;
+    startingRef.current = true;
 
     try {
-      // The presence of the "_complete.json" marker -- written by the worker
-      // only once every frame has been uploaded -- is what "already
-      // processed" actually means. Checking for *any* file here would be
-      // wrong: a job that died partway through leaves some frames sitting in
-      // the bucket, and treating that as "done" would hand back a broken,
-      // incomplete result instead of finishing the job.
-      const { data: existing, error: listError } = await supabase.storage
-        .from(OUTPUT_BUCKET)
-        .list(outputPrefix, { limit: 1, search: "_complete.json" });
-      if (listError) throw listError;
-
-      if (existing && existing.length > 0) {
-        setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
-        setAlreadyProcessed(true);
-        setView("done");
+      if (!isSupabaseConfigured) {
+        setError(
+          "Supabase isn't configured yet — add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in the Vercel project settings, then redeploy."
+        );
+        setView("error");
         return;
       }
 
-      setAlreadyProcessed(false);
-      setView("processing");
-      setStep(0);
+      setError(null);
+      setChecking(true);
 
-      // Same content hash -> same input key, so skip re-uploading a video
-      // that's already sitting in the input bucket from a prior attempt
-      // (whether that attempt finished or died partway through).
-      const { data: existingInput, error: inputListError } = await supabase.storage
-        .from(INPUT_BUCKET)
-        .list(`input/${contentHash}`, { limit: 1 });
-      if (inputListError) throw inputListError;
-
-      if (!existingInput || existingInput.length === 0) {
-        const { error: uploadError } = await supabase.storage
-          .from(INPUT_BUCKET)
-          .upload(videoKey, file, { upsert: true });
-        if (uploadError) throw uploadError;
+      // Deterministic on file content + the DaVinci setting (which changes the
+      // output itself, via normalization) rather than a random UUID, so the
+      // same video processed the same way always lands at the same output
+      // location -- that's what lets us detect "already processed" below
+      // instead of silently re-running the job every time.
+      const baseName = file.name.replace(/\.[^.]+$/, "");
+      let contentHash: string;
+      try {
+        contentHash = await sha256Hex(file);
+      } catch (e) {
+        setChecking(false);
+        setError(e instanceof Error ? e.message : "Couldn't read the file.");
+        setView("error");
+        return;
       }
+      const videoKey = `input/${contentHash}/${sanitizeFileName(file.name)}`;
+      const outputPrefix = `sequence_${contentHash}_${davinciSafe ? "dvsafe" : "raw"}`;
 
-      setStep(1);
-      const { id: jobId } = await startJob({
-        input_bucket: INPUT_BUCKET,
-        video_key: videoKey,
-        output_bucket: OUTPUT_BUCKET,
-        output_prefix: outputPrefix,
-        davinci_safe: davinciSafe,
-      });
+      try {
+        // The presence of the "_complete.json" marker -- written by the worker
+        // only once every frame has been uploaded -- is what "already
+        // processed" actually means. Checking for *any* file here would be
+        // wrong: a job that died partway through leaves some frames sitting in
+        // the bucket, and treating that as "done" would hand back a broken,
+        // incomplete result instead of finishing the job.
+        const { data: existing, error: listError } = await supabase.storage
+          .from(OUTPUT_BUCKET)
+          .list(outputPrefix, { limit: 1, search: "_complete.json" });
+        if (listError) throw listError;
 
-      await pollJobUntilDone(jobId, (status: JobStatus, output: unknown) => {
-        if (status !== "IN_PROGRESS") return;
-        setStep(2);
-        const progress = parseRenderProgress(output);
-        setRenderProgress(progress);
-        if (!progress) return;
-        if (!renderBaselineRef.current) {
-          renderBaselineRef.current = { time: Date.now(), frameIndex: progress.frameIndex };
-          setRenderEtaSeconds(null);
-        } else {
-          setRenderEtaSeconds(estimateEtaSeconds(progress, renderBaselineRef.current));
+        if (existing && existing.length > 0) {
+          setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
+          setAlreadyProcessed(true);
+          setView("done");
+          return;
         }
-      });
 
-      setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
-      setView("done");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong.");
-      setView("error");
+        setAlreadyProcessed(false);
+        setView("processing");
+        setStep(0);
+
+        // Same content hash -> same input key, so skip re-uploading a video
+        // that's already sitting in the input bucket from a prior attempt
+        // (whether that attempt finished or died partway through).
+        const { data: existingInput, error: inputListError } = await supabase.storage
+          .from(INPUT_BUCKET)
+          .list(`input/${contentHash}`, { limit: 1 });
+        if (inputListError) throw inputListError;
+
+        if (!existingInput || existingInput.length === 0) {
+          const { error: uploadError } = await supabase.storage
+            .from(INPUT_BUCKET)
+            .upload(videoKey, file, { upsert: true });
+          if (uploadError) throw uploadError;
+        }
+
+        setStep(1);
+        const { id: jobId } = await startJob({
+          input_bucket: INPUT_BUCKET,
+          video_key: videoKey,
+          output_bucket: OUTPUT_BUCKET,
+          output_prefix: outputPrefix,
+          davinci_safe: davinciSafe,
+        });
+
+        await pollJobUntilDone(jobId, (status: JobStatus, output: unknown) => {
+          if (status !== "IN_PROGRESS") return;
+          setStep(2);
+          const progress = parseRenderProgress(output);
+          setRenderProgress(progress);
+          if (!progress) return;
+          if (!renderBaselineRef.current) {
+            renderBaselineRef.current = { time: Date.now(), frameIndex: progress.frameIndex };
+            setRenderEtaSeconds(null);
+          } else {
+            setRenderEtaSeconds(estimateEtaSeconds(progress, renderBaselineRef.current));
+          }
+        });
+
+        setOutputInfo(await outputInfoForJob(outputPrefix, baseName));
+        setView("done");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Something went wrong.");
+        setView("error");
+      } finally {
+        setChecking(false);
+      }
     } finally {
-      setChecking(false);
+      startingRef.current = false;
     }
   }
 
@@ -472,7 +487,7 @@ function IdleView({
         <div>
           <div style={{ fontSize: 14, fontWeight: 500 }}>Drag a file here or click to browse</div>
           <div style={{ fontSize: 10, color: "#999999", marginTop: 4 }}>
-            Outputs as {OUTPUT_FORMAT_LABEL} — up to 1 minute, 6GB
+            Outputs as {OUTPUT_FORMAT_LABEL} — up to 1 minute, {formatSize(MAX_BYTES)}
           </div>
           {error && <div style={styles.inlineError}>{error}</div>}
         </div>
