@@ -210,5 +210,11 @@ export async function downloadOutputAsZip(
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  // Revoking immediately after click() races the browser's download
+  // handler -- for a large blob (hundreds of MB to a few GB on a
+  // thousand-plus-frame job) the browser hasn't necessarily started
+  // reading it yet, so the URL can go invalid before the save actually
+  // begins and the download silently never happens. Give it a few
+  // seconds' head start before freeing the blob URL.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
