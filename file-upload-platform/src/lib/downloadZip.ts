@@ -168,12 +168,22 @@ export async function downloadOutputAsZip(
       const index = nextIndex++;
       const file = frames[index];
       const path = `${outputPrefix}/${file.name}`;
-      const { data: blob, error } = await supabase.storage.from(outputBucket).download(path);
-      if (error) {
+      // .download() always attaches an Authorization header, which forces a
+      // CORS preflight (OPTIONS) before every single GET -- confirmed in
+      // Supabase's own request logs, doubling the request count on jobs
+      // with hundreds of frames. depth-outputs is a public bucket, so a
+      // plain fetch() of its public URL (no custom headers) is a "simple"
+      // CORS request and skips the preflight entirely.
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from(outputBucket).getPublicUrl(path);
+      const res = await fetch(publicUrl);
+      if (!res.ok) {
         throw new Error(
           `Could not read ${file.name} from job output (frame ${index + 1} of ${manifest.frame_count}).`
         );
       }
+      const blob = await res.blob();
       zip.file(file.name, blob);
       downloadedCount++;
       onProgress?.((downloadedCount / frames.length) * DOWNLOAD_PROGRESS_WEIGHT);
