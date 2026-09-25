@@ -171,19 +171,32 @@ export async function downloadOutputAsZip(
       // .download() always attaches an Authorization header, which forces a
       // CORS preflight (OPTIONS) before every single GET -- confirmed in
       // Supabase's own request logs, doubling the request count on jobs
-      // with hundreds of frames. depth-outputs is a public bucket, so a
-      // plain fetch() of its public URL (no custom headers) is a "simple"
-      // CORS request and skips the preflight entirely.
+      // with hundreds of frames. depth-outputs is currently a public
+      // bucket, so a plain fetch() of its public URL (no custom headers) is
+      // a "simple" CORS request and skips the preflight entirely. But
+      // getPublicUrl() is just a string builder -- it doesn't check the
+      // bucket's actual public/private setting, so if that ever changes
+      // (or on a fresh deploy that only follows SETUP.md's RLS-policy
+      // instructions without also marking the bucket public), the
+      // unauthenticated fetch would fail for every frame. Fall back to the
+      // authenticated download in that case so this keeps working either
+      // way -- slower without the public bucket, but never broken.
       const {
         data: { publicUrl },
       } = supabase.storage.from(outputBucket).getPublicUrl(path);
-      const res = await fetch(publicUrl);
-      if (!res.ok) {
-        throw new Error(
-          `Could not read ${file.name} from job output (frame ${index + 1} of ${manifest.frame_count}).`
-        );
+      const publicRes = await fetch(publicUrl);
+      let blob: Blob;
+      if (publicRes.ok) {
+        blob = await publicRes.blob();
+      } else {
+        const { data, error } = await supabase.storage.from(outputBucket).download(path);
+        if (error || !data) {
+          throw new Error(
+            `Could not read ${file.name} from job output (frame ${index + 1} of ${manifest.frame_count}).`
+          );
+        }
+        blob = data;
       }
-      const blob = await res.blob();
       zip.file(file.name, blob);
       downloadedCount++;
       onProgress?.((downloadedCount / frames.length) * DOWNLOAD_PROGRESS_WEIGHT);

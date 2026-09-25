@@ -390,12 +390,22 @@ def process_video_depth(
         # GPU idle for the whole upload phase every chunk.
         upload_executor = ThreadPoolExecutor(max_workers=UPLOAD_CONCURRENCY)
         pending_uploads: list = []
+        # Separate from frame_index (which advances as soon as a chunk's
+        # uploads are DISPATCHED, so the next chunk's frame numbering stays
+        # correct) -- this only advances once uploads are CONFIRMED done,
+        # so progress reported to the frontend never claims a frame is
+        # finished before it actually is, and a permanent upload failure
+        # is never silently reported as progress either.
+        confirmed_frames = 0
 
         def wait_for_pending_uploads():
-            nonlocal pending_uploads
+            nonlocal pending_uploads, confirmed_frames
             for future in pending_uploads:
                 future.result()
+            confirmed_frames += len(pending_uploads)
             pending_uploads = []
+            if on_progress and total_frames:
+                on_progress(confirmed_frames, total_frames)
 
         def flush_chunk(buffer, overlap=0):
             nonlocal frame_index, chunk_num, prev_depth_min, prev_depth_max, prev_tail_depth, pending_uploads
@@ -561,7 +571,11 @@ def process_video_depth(
 
             frame_index += n_new
             print(f"[chunk {chunk_num}] Dispatched {n_new} frame(s) for background upload, {frame_index} total so far.")
-            report_progress()
+            # Not calling report_progress() here -- it would report these
+            # frames as done based on frame_index before their uploads have
+            # actually been confirmed. wait_for_pending_uploads() reports
+            # progress itself once this chunk's uploads are confirmed, at
+            # the start of the next chunk (or in the final wait below).
 
         try:
             if DECORD_AVAILABLE:
@@ -570,6 +584,13 @@ def process_video_depth(
                     if uploaded_frames and all(i in uploaded_frames for i in range(start, end)):
                         print(f"[chunk] frames {start}-{end - 1} already uploaded, skipping.")
                         frame_index = end
+                        # Keep confirmed_frames in sync -- these frames are
+                        # verified already in storage (the all(...) check
+                        # above), so they count as confirmed too, same as
+                        # ones this run just uploaded. Otherwise progress
+                        # reported via wait_for_pending_uploads() below would
+                        # undercount by however many chunks got skipped.
+                        confirmed_frames = frame_index
                         # A skipped chunk means the next processed chunk has no
                         # prior in-memory depth to align against -- see the
                         # prev_tail_depth comment above.
