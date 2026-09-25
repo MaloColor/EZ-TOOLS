@@ -724,11 +724,15 @@ def handler(job):
 
     except Exception as e:
         print(f"ERROR OCCURRED DURING JOB PROCESSING: {str(e)}")
-        return {
-            "status": "error",
-            "error_type": type(e).__name__,
-            "message": str(e)
-        }
+        # RunPod's SDK only marks a job FAILED if the returned dict has a
+        # top-level "error" key (it pops "error" specifically -- see
+        # rp_job.py's run_job()); a "status": "error" field, which this
+        # used to return, isn't recognized at all, so the job was reported
+        # as COMPLETED with this dict as if it were a normal successful
+        # result. The frontend never saw the real failure or this message --
+        # it would instead fail later and confusingly on a missing
+        # _complete.json, with no indication of what actually went wrong.
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 if __name__ == "__main__":

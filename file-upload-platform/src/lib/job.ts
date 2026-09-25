@@ -21,7 +21,7 @@ export async function startJob(input: {
 
 export async function getJobStatus(
   id: string
-): Promise<{ status: JobStatus; output: unknown }> {
+): Promise<{ status: JobStatus; output: unknown; error?: string | null }> {
   const res = await fetch(`/api/job-status?id=${encodeURIComponent(id)}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -49,11 +49,15 @@ export async function pollJobUntilDone(
 ): Promise<unknown> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const { status, output } = await getJobStatus(id);
+    const { status, output, error } = await getJobStatus(id);
     onTick(status, output);
     if (status === "COMPLETED") return output;
     if (status === "FAILED" || status === "CANCELLED" || status === "TIMED_OUT") {
-      throw new Error(`RunPod job ended with status ${status}`);
+      // `error` is the worker's actual failure reason (see handler.py's
+      // except block) when RunPod reports one -- surface it instead of
+      // just the status, so a real crash (bad video, OOM, network error)
+      // shows up as something the user or you can actually act on.
+      throw new Error(error ? `Processing failed: ${error}` : `RunPod job ended with status ${status}`);
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }

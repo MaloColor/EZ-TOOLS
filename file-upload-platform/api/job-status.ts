@@ -32,5 +32,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const data = await runpodRes.json();
   // Pass through RunPod's own status vocabulary (IN_QUEUE, IN_PROGRESS,
   // COMPLETED, FAILED) — the client maps these to UI steps itself.
-  res.status(200).json({ id: data.id, status: data.status, output: data.output ?? null });
+  // `error` is RunPod's own top-level field for why a FAILED job failed
+  // (set when the worker's handler returns {"error": ...} or raises) —
+  // was being silently dropped here, so a real failure reason from the
+  // worker never reached the frontend at all.
+  res.status(200).json({ id: data.id, status: data.status, output: data.output ?? null, error: data.error ?? null });
 }
