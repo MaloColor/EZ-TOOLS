@@ -280,9 +280,11 @@ export default function App() {
     downloadingRef.current = true;
     setDownloading(true);
     setDownloadProgress(0);
+    setError(null);
     try {
       await downloadOutputAsZip(OUTPUT_BUCKET, outputInfo.prefix, `${outputInfo.baseName}_depth`, setDownloadProgress);
     } catch (e) {
+      console.error("[download-zip] failed:", e);
       setError(e instanceof Error ? e.message : "Download failed.");
     } finally {
       downloadingRef.current = false;
@@ -371,6 +373,7 @@ export default function App() {
                 outputInfo={outputInfo}
                 downloading={downloading}
                 downloadProgress={downloadProgress}
+                error={error}
                 alreadyProcessed={alreadyProcessed}
                 onReset={reset}
                 onDownload={handleDownload}
@@ -631,6 +634,7 @@ function DoneView({
   outputInfo,
   downloading,
   downloadProgress,
+  error,
   alreadyProcessed,
   onReset,
   onDownload,
@@ -638,6 +642,7 @@ function DoneView({
   outputInfo: OutputInfo;
   downloading: boolean;
   downloadProgress: number;
+  error: string | null;
   alreadyProcessed: boolean;
   onReset: () => void;
   onDownload: () => void;
@@ -671,6 +676,9 @@ function DoneView({
             {downloadPercent < 90 ? "Downloading frames…" : "Packaging zip…"} {downloadPercent}%
           </div>
         </div>
+      )}
+      {!downloading && error && (
+        <div style={{ ...styles.inlineError, textAlign: "center", maxWidth: 420 }}>Download failed: {error}</div>
       )}
       <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
         <button onClick={onReset} style={styles.secondaryButton}>
