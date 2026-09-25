@@ -382,8 +382,23 @@ def process_video_depth(
         prev_tail_depth = None
         report_progress()  # initial 0/total_frames so the frontend has a real number immediately
 
+        # Persistent upload pool + the previous chunk's not-yet-confirmed
+        # upload futures. Pipelining (see flush_chunk below): each chunk
+        # waits only for the PREVIOUS chunk's uploads before dispatching
+        # its own, so the next chunk's decode+inference can start right
+        # away while uploads run in the background instead of leaving the
+        # GPU idle for the whole upload phase every chunk.
+        upload_executor = ThreadPoolExecutor(max_workers=UPLOAD_CONCURRENCY)
+        pending_uploads: list = []
+
+        def wait_for_pending_uploads():
+            nonlocal pending_uploads
+            for future in pending_uploads:
+                future.result()
+            pending_uploads = []
+
         def flush_chunk(buffer, overlap=0):
-            nonlocal frame_index, chunk_num, prev_depth_min, prev_depth_max, prev_tail_depth
+            nonlocal frame_index, chunk_num, prev_depth_min, prev_depth_max, prev_tail_depth, pending_uploads
             if len(buffer) == 0:
                 return
             chunk_num += 1
@@ -418,9 +433,17 @@ def process_video_depth(
                 print(f"[GPU CHECK] post-inference memory_allocated() = {allocated:.3f} GB")
                 print(f"[GPU CHECK] post-inference memory_reserved()  = {reserved:.3f} GB")
 
+            # Not calling torch.cuda.empty_cache() here on purpose. The
+            # original SIGKILL/exit-137 crashes that motivated chunking in
+            # the first place (see CHUNK_SIZE_FRAMES above) look like a
+            # host-RAM OOM, not a CUDA OOM -- chunking itself is what fixed
+            # that, not this call. Releasing cached GPU memory every chunk
+            # just forces a device sync plus a fresh cudaMalloc on the next
+            # chunk instead of letting the caching allocator reuse the
+            # blocks it already has reserved, adding a stall between every
+            # chunk for no real benefit. Revisit if GPU OOM actually shows
+            # up in production logs.
             del chunk_frames
-            if device == "cuda":
-                torch.cuda.empty_cache()
 
             # Align this chunk's depth scale onto the previous chunk's,
             # using the overlap frames both chunks were run on -- fixes the
@@ -508,10 +531,9 @@ def process_video_depth(
 
             # Encode + upload every frame in this chunk in parallel instead
             # of one at a time -- each frame is an independent PNG encode
-            # (CPU) plus an independent HTTP request (network-bound), so
-            # serializing them just leaves the GPU idle waiting on hundreds
-            # of sequential round trips per chunk. Frame index is computed
-            # up front per frame, so completion order doesn't matter.
+            # (CPU) plus an independent HTTP request (network-bound).
+            # Frame index is computed up front per frame, so completion
+            # order doesn't matter.
             chunk_start_index = frame_index
 
             def encode_and_upload(offset: int):
@@ -522,66 +544,81 @@ def process_video_depth(
                     get_supabase_for_upload(), output_bucket, f"{output_prefix}/{frame_filename}", png_bytes
                 )
 
-            with ThreadPoolExecutor(max_workers=min(UPLOAD_CONCURRENCY, n_new)) as executor:
-                # Calling .result() on each future (rather than just
-                # gathering them) re-raises the first exception hit -- a
-                # frame that exhausts upload_with_retry's attempts still
-                # fails the whole job instead of silently vanishing.
-                for future in [executor.submit(encode_and_upload, i) for i in range(n_new)]:
-                    future.result()
+            # Wait for the PREVIOUS chunk's uploads (not this one) before
+            # dispatching this chunk's -- bounds in-flight uploads to one
+            # chunk's worth (so PNG bytes + chunk_depths for at most two
+            # chunks are ever alive at once) and surfaces a permanent
+            # upload failure (.result() re-raises) within one chunk of it
+            # happening instead of silently deferring it to the end of the
+            # job. This chunk's uploads are then dispatched and NOT waited
+            # on here -- they run in the background while the caller moves
+            # on to decoding/inferring the next chunk, which is the actual
+            # pipelining: the GPU is no longer idle during the upload phase.
+            wait_for_pending_uploads()
+            pending_uploads = [
+                upload_executor.submit(encode_and_upload, i) for i in range(n_new)
+            ]
 
             frame_index += n_new
-            print(f"[chunk {chunk_num}] Uploaded {n_new} frame(s), {frame_index} total so far.")
+            print(f"[chunk {chunk_num}] Dispatched {n_new} frame(s) for background upload, {frame_index} total so far.")
             report_progress()
 
-        if DECORD_AVAILABLE:
-            for start in range(0, total_frames, CHUNK_SIZE_FRAMES):
-                end = min(start + CHUNK_SIZE_FRAMES, total_frames)
-                if uploaded_frames and all(i in uploaded_frames for i in range(start, end)):
-                    print(f"[chunk] frames {start}-{end - 1} already uploaded, skipping.")
-                    frame_index = end
-                    # A skipped chunk means the next processed chunk has no
-                    # prior in-memory depth to align against -- see the
-                    # prev_tail_depth comment above.
-                    prev_tail_depth = None
-                    report_progress()
-                    continue
-                # Re-read the previous chunk's last CHUNK_OVERLAP_FRAMES
-                # frames too (decord can seek, so this is just re-decoding,
-                # not re-inferring anything we didn't already infer) so
-                # flush_chunk can align this chunk onto the previous one's
-                # depth scale. None for the very first chunk.
-                overlap = min(CHUNK_OVERLAP_FRAMES, start)
-                chunk = vr.get_batch(list(range(start - overlap, end))).asnumpy()
-                flush_chunk(chunk, overlap=overlap)
-        else:
-            # cv2 has no reliable random-access seek here (see the DECORD_AVAILABLE
-            # comment at the top of this file), so unlike the decord path this
-            # can't skip decoding already-uploaded frames -- it re-decodes
-            # everything, but upload_with_retry's upsert makes re-uploading
-            # already-present frames a harmless no-op rather than a failure.
-            # Since there's no seeking, the last CHUNK_OVERLAP_FRAMES raw
-            # frames of each chunk are kept around (cheap -- just a handful
-            # of images) and prepended to the next chunk's buffer instead,
-            # for the same alignment purpose as the decord path's re-seek.
-            buffer = []
-            overlap_carry = []
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                buffer.append(frame)
-                if len(buffer) >= CHUNK_SIZE_FRAMES:
+        try:
+            if DECORD_AVAILABLE:
+                for start in range(0, total_frames, CHUNK_SIZE_FRAMES):
+                    end = min(start + CHUNK_SIZE_FRAMES, total_frames)
+                    if uploaded_frames and all(i in uploaded_frames for i in range(start, end)):
+                        print(f"[chunk] frames {start}-{end - 1} already uploaded, skipping.")
+                        frame_index = end
+                        # A skipped chunk means the next processed chunk has no
+                        # prior in-memory depth to align against -- see the
+                        # prev_tail_depth comment above.
+                        prev_tail_depth = None
+                        report_progress()
+                        continue
+                    # Re-read the previous chunk's last CHUNK_OVERLAP_FRAMES
+                    # frames too (decord can seek, so this is just re-decoding,
+                    # not re-inferring anything we didn't already infer) so
+                    # flush_chunk can align this chunk onto the previous one's
+                    # depth scale. None for the very first chunk.
+                    overlap = min(CHUNK_OVERLAP_FRAMES, start)
+                    chunk = vr.get_batch(list(range(start - overlap, end))).asnumpy()
+                    flush_chunk(chunk, overlap=overlap)
+            else:
+                # cv2 has no reliable random-access seek here (see the DECORD_AVAILABLE
+                # comment at the top of this file), so unlike the decord path this
+                # can't skip decoding already-uploaded frames -- it re-decodes
+                # everything, but upload_with_retry's upsert makes re-uploading
+                # already-present frames a harmless no-op rather than a failure.
+                # Since there's no seeking, the last CHUNK_OVERLAP_FRAMES raw
+                # frames of each chunk are kept around (cheap -- just a handful
+                # of images) and prepended to the next chunk's buffer instead,
+                # for the same alignment purpose as the decord path's re-seek.
+                buffer = []
+                overlap_carry = []
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    buffer.append(frame)
+                    if len(buffer) >= CHUNK_SIZE_FRAMES:
+                        overlap = len(overlap_carry)
+                        full_buffer = overlap_carry + buffer
+                        flush_chunk(full_buffer, overlap=overlap)
+                        overlap_carry = full_buffer[-CHUNK_OVERLAP_FRAMES:]
+                        buffer = []
+                cap.release()
+                if buffer:
                     overlap = len(overlap_carry)
-                    full_buffer = overlap_carry + buffer
-                    flush_chunk(full_buffer, overlap=overlap)
-                    overlap_carry = full_buffer[-CHUNK_OVERLAP_FRAMES:]
-                    buffer = []
-            cap.release()
-            if buffer:
-                overlap = len(overlap_carry)
-                flush_chunk(overlap_carry + buffer, overlap=overlap)
+                    flush_chunk(overlap_carry + buffer, overlap=overlap)
+
+            # Wait for the LAST chunk's uploads too -- the manifest written
+            # below must not claim the job complete until every frame has
+            # actually finished uploading, not just been dispatched.
+            wait_for_pending_uploads()
+        finally:
+            upload_executor.shutdown(wait=True)
 
         if frame_index == 0:
             raise ValueError("No frames could be extracted from the provided video file.")
