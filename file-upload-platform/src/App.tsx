@@ -127,6 +127,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
   const renderBaselineRef = useRef<{ time: number; frameIndex: number } | null>(null);
+  const downloadingRef = useRef(false);
 
   function reset() {
     setView("idle");
@@ -269,6 +270,14 @@ export default function App() {
 
   async function handleDownload() {
     if (!outputInfo) return;
+    // The `disabled={downloading}` on the button relies on React re-rendering
+    // the DOM after setDownloading(true) below -- that happens on the next
+    // tick, not synchronously, so a fast double click (or any duplicate
+    // click event) can invoke this a second time before the button is
+    // actually disabled, kicking off a second zip+download in parallel.
+    // downloadingRef updates immediately, so this guard is race-free.
+    if (downloadingRef.current) return;
+    downloadingRef.current = true;
     setDownloading(true);
     setDownloadProgress(0);
     try {
@@ -276,6 +285,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Download failed.");
     } finally {
+      downloadingRef.current = false;
       setDownloading(false);
     }
   }
